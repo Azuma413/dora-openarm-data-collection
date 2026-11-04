@@ -77,6 +77,11 @@ nodes:
       --mode bimanual --tick-hz 250
       --max-iters 5 --damping 0.1
       --posture-cost 0 --lm-damping 0.01 --limit-velocity
+      --frame-position-error-limit 0.001
+      --frame-orientation-error-limit 0.004
+      --nullspace-cost 5.0                                                         
+      --nullspace-return-rate 2.0  
+
     inputs:
       target_right: webxr/pose_right
       target_left: webxr/pose_left

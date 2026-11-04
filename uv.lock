@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 
 [[package]]
@@ -188,6 +188,17 @@ wheels = [
 ]
 
 [[package]]
+name = "cython"
+version = "3.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/ca/18e324972e5cac914816fdd7bb03e19a455b90039c277a538f7781b50c85/cython-3.3.1.tar.gz", hash = "sha256:e0e45989e821bef6aa9ae15c7d583ab5e055f7406c4b3624e49e06d24e90375a", size = 3743354, upload-time = "2026-11-01T20:12:04.773Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/c6/51ffdd996a1e6836792061ebe7ecf40480f1bd5693a721cea0ad4a689a81/cython-3.3.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:215669fd0ce792080cd4d0748db7e1e31f424b6706a6220d08339895e6a3a03a", size = 3418124, upload-time = "2026-11-01T20:12:41.076Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/dc/ca2ea10c22499e00d366a9252177ec9039b8d786c85fd28260d41ec2dda5/cython-3.3.1-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:5febfc8c52aced0cf9360e6f2304428a5fa0e66fd9aa7338d5c41f0ce26dd104", size = 3267528, upload-time = "2026-11-01T20:13:18.074Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/55/088578d75bc8dbcbc535af04b1d596ff227ca756dd74f9d3c1c526f955d0/cython-3.3.1-py3-none-any.whl", hash = "sha256:61abc7feedd20dac6c4ff7ab3a30e17136a067b242ab9253e2b4a6d9a72c2b61", size = 1352000, upload-time = "2026-11-01T20:12:01.888Z" },
+]
+
+[[package]]
 name = "daqp"
 version = "0.7.2"
 source = { registry = "https://pypi.org/simple" }
@@ -291,10 +302,12 @@ dependencies = [
     { name = "dora-openarm-quitter" },
     { name = "dora-openarm-vr" },
     { name = "dora-openarm-webxr" },
+    { name = "dora-openarm-zed" },
     { name = "dora-opencv-image-splitter" },
     { name = "dora-rs-cli" },
     { name = "openarm-driver" },
     { name = "opencv-video-capture" },
+    { name = "pyzed", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 
 [package.metadata]
@@ -313,10 +326,12 @@ requires-dist = [
     { name = "dora-openarm-quitter", editable = "nodes/dora-openarm-quitter" },
     { name = "dora-openarm-vr", editable = "nodes/dora-openarm-vr" },
     { name = "dora-openarm-webxr", editable = "nodes/dora-openarm-webxr" },
+    { name = "dora-openarm-zed", editable = "nodes/dora-openarm-zed" },
     { name = "dora-opencv-image-splitter", editable = "nodes/dora-opencv-image-splitter" },
     { name = "dora-rs-cli", specifier = "==1.0.1" },
     { name = "openarm-driver", specifier = ">=0.5.1" },
     { name = "opencv-video-capture" },
+    { name = "pyzed", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://download.stereolabs.com/zedsdk/5.3/whl/linux_x86_64/pyzed-5.3-cp312-cp312-linux_x86_64.whl" },
 ]
 
 [[package]]
@@ -345,7 +360,7 @@ dev = [
 
 [[package]]
 name = "dora-openarm-dataset-recorder"
-version = "0.5.0"
+version = "0.5.2"
 source = { editable = "nodes/dora-openarm-dataset-recorder" }
 dependencies = [
     { name = "dora-rs" },
@@ -564,6 +579,27 @@ dev = [
     { name = "dora-rs-cli", specifier = ">=0.5.0" },
     { name = "pytest", specifier = ">=8.1.1" },
     { name = "ruff", specifier = "==0.14.11" },
+]
+
+[[package]]
+name = "dora-openarm-zed"
+version = "0.1.0"
+source = { editable = "nodes/dora-openarm-zed" }
+dependencies = [
+    { name = "dora-rs" },
+    { name = "numpy" },
+    { name = "opencv-python-headless" },
+    { name = "pyarrow" },
+    { name = "pyzed", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dora-rs", specifier = ">=0.5.0,<=1.0.1" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "opencv-python-headless" },
+    { name = "pyarrow" },
+    { name = "pyzed", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 
 [[package]]
@@ -1299,6 +1335,27 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/86/bf/899e81e4cce32febab4fb42bb97dcdf66bc135272882d1987881a4b519e9/pyyaml-6.0.3-cp312-cp312-win_amd64.whl", hash = "sha256:5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b", size = 154003, upload-time = "2025-09-25T21:32:21.167Z" },
     { url = "https://files.pythonhosted.org/packages/1a/08/67bd04656199bbb51dbed1439b7f27601dfb576fb864099c7ef0c3e55531/pyyaml-6.0.3-cp312-cp312-win_arm64.whl", hash = "sha256:64386e5e707d03a7e172c0701abfb7e10f0fb753ee1d773128192742712a98fd", size = 140344, upload-time = "2025-09-25T21:32:22.617Z" },
 ]
+
+[[package]]
+name = "pyzed"
+version = "5.3"
+source = { url = "https://download.stereolabs.com/zedsdk/5.3/whl/linux_x86_64/pyzed-5.3-cp312-cp312-linux_x86_64.whl" }
+dependencies = [
+    { name = "cython" },
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://download.stereolabs.com/zedsdk/5.3/whl/linux_x86_64/pyzed-5.3-cp312-cp312-linux_x86_64.whl", hash = "sha256:0d068b13a9dd3bbb789ab18de84adf8a308ced35fa01513a9f43ecabccef01fd" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cython", specifier = ">=3.0.0" },
+    { name = "numpy", specifier = ">=2.0,<3.0" },
+    { name = "opencv-python", marker = "extra == 'sample'" },
+    { name = "pyopengl", marker = "extra == 'sample'" },
+]
+provides-extras = ["sample"]
 
 [[package]]
 name = "qpsolvers"
