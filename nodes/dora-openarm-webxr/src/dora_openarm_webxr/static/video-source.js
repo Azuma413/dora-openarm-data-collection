@@ -19,7 +19,10 @@
 // muted and plays inline because a headset browser will not start a video
 // that could make noise without a gesture it never gets here.
 
-export function createVideoSource(track) {
+// The element on its own (openarm-quest-teleop patch 15): the 3D view hands
+// it to a three.js VideoTexture, which does its own uploading, rather than
+// calling texImage2D in a context three.js owns the state of.
+export function createVideoElement(track) {
   const video = document.createElement("video");
   video.autoplay = true;
   video.muted = true;
@@ -28,6 +31,11 @@ export function createVideoSource(track) {
   // A rejected play() leaves the texture blank rather than throwing into
   // the render loop, where it would stop everything else being drawn.
   video.play().catch(() => {});
+  return video;
+}
+
+export function createVideoSource(track) {
+  const video = createVideoElement(track);
 
   let uploaded = -1;
 

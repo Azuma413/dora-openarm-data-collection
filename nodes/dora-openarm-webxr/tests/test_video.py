@@ -48,30 +48,23 @@ def _push(eye: str, payload: bytes) -> None:
     )
 
 
+# Every view also carries the overview and both arm cameras, after the head
+# cameras, because the page tells tracks apart by negotiation order.
+OBSERVATION = ["main", "arm_left", "arm_right"]
+
+
 def test_eyes_default_mono():
-    assert video.eyes() == ["right"]
-
-
-def test_video_workers_option(monkeypatch):
-    monkeypatch.delenv("VIDEO_WORKERS", raising=False)
-    parser = argparse.ArgumentParser()
-    video.add_arguments(parser)
-    assert parser.parse_args([]).video_workers == 0
-    monkeypatch.setenv("VIDEO_WORKERS", "2")
-    parser = argparse.ArgumentParser()
-    video.add_arguments(parser)
-    assert parser.parse_args([]).video_workers == 2
-    assert parser.parse_args(["--video-workers", "4"]).video_workers == 4
+    assert video.eyes() == ["right", *OBSERVATION]
 
 
 def test_eyes_stereo(tmp_path):
     _configure_view(tmp_path, "stereo")
-    assert video.eyes() == ["left", "right"]
+    assert video.eyes() == ["left", "right", *OBSERVATION]
 
 
 def test_eyes_none(tmp_path):
     _configure_view(tmp_path, "none")
-    assert video.eyes() == []
+    assert video.eyes() == OBSERVATION
 
 
 def test_handle_event_ignores_other_inputs():

@@ -1,0 +1,14 @@
+{
+  "name": "dora-openarm-webxr-web-test",
+  "private": true,
+  "description": "openarm-quest-teleop: browser test of the patched WebXR page (Playwright Chromium + IWER)",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "node webxr_page.test.mjs"
+  },
+  "devDependencies": {
+    "iwer": "2.4.0",
+    "playwright": "1.63.0"
+  }
+}

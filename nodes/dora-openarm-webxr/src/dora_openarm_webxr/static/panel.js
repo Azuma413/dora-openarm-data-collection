@@ -27,11 +27,12 @@ attribute vec2 a_corner;
 uniform mat4 u_projection;
 uniform mat4 u_view;
 uniform vec2 u_half_extent;
+uniform vec2 u_center;
 uniform float u_distance;
 varying vec2 v_uv;
 void main() {
   gl_Position = u_projection * u_view *
-    vec4(a_corner * u_half_extent, -u_distance, 1.0);
+    vec4(a_corner * u_half_extent + u_center, -u_distance, 1.0);
   // Flipped because the image starts at its top row and texture
   // coordinates start at the bottom. Done here rather than with
   // UNPACK_FLIP_Y_WEBGL, which browsers honour inconsistently.
@@ -94,6 +95,7 @@ class CameraPanel {
       "u_projection",
       "u_view",
       "u_half_extent",
+      "u_center",
       "u_distance",
       "u_texture",
     ]) {
@@ -132,7 +134,7 @@ class CameraPanel {
     }
   }
 
-  render(session, space, frame) {
+  render(session, space, frame, clear = true) {
     if (!this.#gl || !this.#configuration) {
       return;
     }
@@ -145,8 +147,10 @@ class CameraPanel {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
     // Transparent so passthrough shows around the panel.
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (clear) {
+      gl.clearColor(0.0, 0.0, 0.0, 0.0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    }
     gl.disable(gl.DEPTH_TEST);
 
     this.#upload();
@@ -167,6 +171,8 @@ class CameraPanel {
     gl.enableVertexAttribArray(this.#attributes.corner);
     gl.vertexAttribPointer(this.#attributes.corner, 2, gl.FLOAT, false, 0, 0);
     gl.uniform2f(this.#uniforms.u_half_extent, halfExtent[0], halfExtent[1]);
+    const center = Array.isArray(panel.center) ? panel.center : [0, 0];
+    gl.uniform2f(this.#uniforms.u_center, center[0] || 0, center[1] || 0);
     gl.uniform1f(this.#uniforms.u_distance, panel.distance);
     gl.uniform1i(this.#uniforms.u_texture, 0);
     gl.activeTexture(gl.TEXTURE0);
@@ -199,4 +205,30 @@ class CameraPanel {
 
 export function createCameraPanel(configuration, track) {
   return new CameraPanel(configuration, track);
+}
+
+export function createCameraPanels(configuration, tracks) {
+  const panels = (configuration.auxiliary_panels || [])
+    .map((panel) =>
+      tracks?.[panel.track]
+        ? new CameraPanel({ ...configuration, panel }, tracks[panel.track])
+        : null,
+    )
+    .filter(Boolean);
+  return {
+    attach(gl) {
+      for (const panel of panels) panel.attach(gl);
+    },
+    render(session, space, frame, clear = false) {
+      panels.forEach((panel, index) =>
+        panel.render(session, space, frame, clear && index === 0),
+      );
+    },
+    close() {
+      for (const panel of panels) panel.close();
+    },
+    get length() {
+      return panels.length;
+    },
+  };
 }

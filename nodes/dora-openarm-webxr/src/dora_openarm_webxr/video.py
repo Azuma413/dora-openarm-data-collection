@@ -18,8 +18,8 @@ Takes the JPEG images of the robot's head camera and forwards them to
 the VR device, so the operator can see the robot's workspace while
 teleoperating. The image is drawn on a panel fixed in the room.
 
-Frames leave on their own WebRTC video track, one per eye, separately
-from the pose messages that feed IK. This module only keeps the newest
+Frames leave on their own WebRTC video track, one per eye, so they never
+delay the pose messages that feed IK. This module only keeps the newest
 frame per eye; :mod:`.webrtc` owns the tracks that encode them. How the
 panel is placed is tuned in ``example/view_camera.yaml``.
 """
@@ -37,6 +37,9 @@ import yaml
 CAMERA_INPUTS = {
     "camera_head_left": "left",
     "camera_head_right": "right",
+    "camera_ceiling": "main",
+    "camera_wrist_left": "arm_left",
+    "camera_wrist_right": "arm_right",
 }
 
 # Used when no --view-configuration-file is given.
@@ -46,13 +49,15 @@ DEFAULT_VIEW_CONFIGURATION: dict = {
     "panel": {"lock": "room", "distance": 1.3, "width": 1.5},
 }
 
-_frames: dict = {"left": None, "right": None}
+TRACKS = ("left", "right", "main", "arm_left", "arm_right")
+
+_frames: dict = {track: None for track in TRACKS}
 # Incremented on every frame so that a track can tell a new frame from a
 # repeated one and always encode the most recent one.
-_sequences: dict = {"left": 0, "right": 0}
+_sequences: dict = {track: 0 for track in TRACKS}
 # One event per eye, because each eye has its own track waiting on it.
 # A shared event would need every waiter to agree on when to clear it.
-_events: dict = {"left": asyncio.Event(), "right": asyncio.Event()}
+_events: dict = {track: asyncio.Event() for track in TRACKS}
 
 _view_configuration: dict = DEFAULT_VIEW_CONFIGURATION
 
@@ -64,16 +69,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         type=pathlib.Path,
         default=os.getenv("VIEW_CONFIGURATION_FILE"),
         help="YAML file with the head camera panel parameters",
-    )
-    parser.add_argument(
-        "--video-workers",
-        type=int,
-        default=int(os.getenv("VIDEO_WORKERS", "0")),
-        help=(
-            "Worker threads for JPEG decoding and WebRTC encoding; "
-            "0 keeps asyncio's default (default: 0). "
-            "Does not set the encoder's internal thread count"
-        ),
     )
 
 
@@ -99,24 +94,47 @@ def view_configuration() -> dict:
     return _view_configuration
 
 
-def eyes() -> list:
-    """Return the eyes this view draws, in track negotiation order.
+# openarm-quest-teleop patch: the views whose page draws the simulated scene as
+# real objects around the operator, and so registers a handler for the ``state``
+# data channel. Kept in step with SCENE_VIEWS in ``static/ar.js``, which is where
+# the page decides the same thing; a view that is not here never reads a scene
+# state message, and the node must not spend the headset's link sending one.
+SCENE_VIEWS = ("scene", "scene+panel")
 
-    ``none`` shows no camera at all, ``stereo`` draws one image per eye,
-    and everything else -- ``mono`` included -- draws the right one only.
-    The order is fixed because the browser tells the tracks apart by the
-    order they were negotiated in.
+
+def draws_scene() -> bool:
+    """Whether this view draws the 3D scene (openarm-quest-teleop patch).
+
+    The page only calls ``connection.onState`` from a 3D view (``ar.js``
+    ``SCENE_VIEWS`` -> ``openSceneView``); anywhere else the ``state`` channel's
+    messages are received, decoded and thrown away. The bytes are still on the
+    air, though, and on the half-duplex 2.4 GHz link a headset usually sits on
+    they take their contention cycles ahead of the hand poses coming back --
+    which is what turns a 72 Hz stream nobody draws into an arm that stops
+    following. So this is what gates both the channel and the forwarding.
+    """
+    return _view_configuration.get("view") in SCENE_VIEWS
+
+
+def eyes() -> list:
+    """Return the camera tracks this view draws, in negotiation order.
+
+    Every view includes the main overview and both arm cameras. ``stereo``
+    adds both head cameras, while ``mono`` and ``scene+panel`` add the right
+    head camera. The order is fixed because the browser tells tracks apart
+    by negotiation order.
     """
     view = _view_configuration.get("view")
-    if view == "none":
-        return []
+    auxiliary = ["main", "arm_left", "arm_right"]
+    if view in {"none", "scene"}:
+        return auxiliary
     if view == "stereo":
-        return ["left", "right"]
-    return ["right"]
+        return ["left", "right", *auxiliary]
+    return ["right", *auxiliary]
 
 
 def handle_event(event) -> bool:
-    """Store a head camera frame. Return whether the event was ours."""
+    """Store a camera frame. Return whether the event was ours."""
     if event["type"] != "INPUT" or event["id"] not in CAMERA_INPUTS:
         return False
     eye = CAMERA_INPUTS[event["id"]]

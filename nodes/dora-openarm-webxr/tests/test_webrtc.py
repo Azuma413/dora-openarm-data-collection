@@ -143,7 +143,12 @@ async def _run_answer_session():
         # how to draw itself.
         await _wait_for(lambda: "configuration" in received)
         configuration = received["configuration"]
-        assert configuration["eyes"] == ["right"]  # The default mono view.
+        assert configuration["eyes"] == [
+            "right",
+            "main",
+            "arm_left",
+            "arm_right",
+        ]  # The default mono view and its always-on observation cameras.
         assert configuration["calibration"] is True
         assert configuration["view_configuration"]["view"] == "mono"
 
@@ -190,6 +195,9 @@ async def _run_calibration_result():
     pc, _xr = _browser_peer(received)
     try:
         await _connect(server, pc, received)
+        # openarm-quest-teleop patch: results go to the active peer only.
+        received["control"].send(json.dumps({"type": "session-start"}))
+        await _wait_for(lambda: server._active_peer is not None)
 
         server.send_control({"type": "calibration-result", "accepted": False})
         await _wait_for(lambda: "calibration-result" in received)
@@ -322,30 +330,58 @@ def test_oneshot_disconnect():
 
 
 def test_only_active_session_can_publish_or_end():
+    # openarm-quest-teleop patch: a session-start no longer displaces an
+    # active peer that is still sending frames. Once that peer has been
+    # quiet for takeover_idle, the newcomer takes over and the old peer's
+    # session is ended for it, so its own late end changes nothing.
+    asyncio.run(_run_only_active_session_can_publish_or_end())
+
+
+class _StandInPeer:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+async def _run_only_active_session_can_publish_or_end():
     frames, started, ended = [], [], []
     server = webrtc.WebRTCServer(
         on_frame=frames.append,
         on_session_start=lambda: started.append(True),
         on_session_end=lambda: ended.append(True),
     )
-    old, current = object(), object()
+    clock = [100.0]
+    server._clock = lambda: clock[0]
+    old, current = _StandInPeer(), _StandInPeer()
+    server._pcs.update((old, current))
     frame = json.dumps({"type": "frame", "sequence": 1})
     start = json.dumps({"type": "session-start"})
     server._handle_frame_message(frame, old)
     assert not frames
     server._handle_control_message(start, old)
     server._handle_frame_message(frame, old)
-    server._handle_control_message(start, current)
+    server._handle_control_message(start, current)  # refused: old is live
+    server._handle_frame_message(frame, current)
+    assert server._active_peer is old
+    assert len(frames) == 1 and not ended
+    clock[0] += webrtc.TAKEOVER_IDLE + 0.01
+    server._handle_control_message(start, current)  # old went quiet
+    assert ended == [True]
     server._handle_frame_message(frame, old)
     server._end_session(old)
-    assert not ended
+    assert ended == [True]
     server._handle_frame_message(frame, current)
     assert len(frames) == len(started) == 2
     server._end_session(current)
     server._end_session(current)
     server._handle_frame_message(frame, current)
-    assert ended == [True]
+    assert ended == [True, True]
     assert len(frames) == 2
+    await _wait_for(lambda: old.closed)
+    assert not current.closed
+    await server.close()
 
 
 async def _run_oneshot_disconnect(server):
@@ -386,7 +422,8 @@ async def _run_oneshot_timeout(server):
     try:
         async with tcp:
             pc.createDataChannel("xr")
-            pc.addTransceiver("video", direction="recvonly")
+            for _ in range(webrtc.VIDEO_TRANSCEIVERS):
+                pc.addTransceiver("video", direction="recvonly")
             await pc.setLocalDescription(await pc.createOffer())
             with pytest.raises(RuntimeError):
                 await server.negotiate_oneshot(pc.localDescription.sdp, host, port, 0.5)

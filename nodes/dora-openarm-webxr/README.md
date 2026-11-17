@@ -73,6 +73,14 @@ device, not in the browser on your local machine. Because the
 certificate is self-signed, the Web browser shows a security
 warning. You can continue to the page from its "Advanced" options.
 
+(openarm-quest-teleop patch) With `PAIRING_TOKEN` set, the node answers
+only offers that carry that token, so open the page as
+`https://$(hostname).local:8443/#k=<token>`. The fragment never leaves
+the browser in a request, and the page keeps the token for the tab, so a
+reload without it still pairs. A page without the right token shows
+"signaling failed: 403". Unset, the node accepts every offer, as
+upstream did, and warns once.
+
 Press the "Start" button on the page to start teleoperation with your
 VR device.
 
@@ -95,9 +103,27 @@ pose, clears its velocity estimate and advances its clock on every tick,
 so recovery does not accumulate a large time step. New sessions instead
 reset the filters: their first valid target passes through unchanged.
 
-Only the most recently started peer supplies targets. Closing its data
-channel, or a failed/closed peer connection, clears the cache; old peers'
-frames and close events cannot affect the active session. Silent packet
+(openarm-quest-teleop patch) A pause only preserves the filtered pose
+for a short dropout. Once a hand's input has been missing for longer
+than `--smoother-reset-gap` (default 0.1 s), the filter is reset, so the
+first pose back is the hand itself rather than a slide toward it from
+where it was lost; the same happens when frames stop for that long while
+ticks keep publishing the last one, when the pose timeout lets go of the
+frame, when an accepted frame arrives more than `--pose-timeout` after the
+previous one (whether or not a tick saw the timeout in between), and when
+the session ends. A downstream clutch that releases on gaps of that length
+then re-anchors on the real hand. openarm-quest-teleop runs this node with
+`POSE_TIMEOUT` 0.09 s, below the clutch's 0.1 s freshness window, and
+`SMOOTHER_RESET_GAP` 0.12 s, above it.
+
+Only the active peer supplies targets. Closing its data channel, or a
+failed/closed peer connection, clears the cache; other peers' frames and
+close events cannot affect the active session. (openarm-quest-teleop
+patch) A `session-start` from another peer while the active one has
+started its session or sent a frame within the last second is refused
+with `session-refused`; otherwise the newcomer takes over and the old peer is sent
+`session-ended` (reason `taken-over`) and closed. The page ends its XR
+session on either message and says why. Silent packet
 loss is different: by default ticks keep using the cached target, like
 UDP VR. Optional `--pose-timeout 0.2` pauses poses after 0.2 seconds without
 a new accepted frame. It defaults to 0 (disabled), uses receive time, and
@@ -140,7 +166,10 @@ headset.
   the hosting service passes the short-lived TURN credentials it mints,
   for networks where a direct path cannot be counted on — TURN needs
   credentials, so it cannot live in a default. Unset or empty, the node
-  uses a public STUN server only.
+  uses a public STUN server only. On one LAN, `'[]'` uses the host
+  candidates alone (openarm-quest-teleop patch: the page served by the
+  node now offers with no ICE servers too, unless its URL names some
+  with `?ice=stun:host:port`, comma-separated or repeated).
 
 This is a **one-shot** connection: the offer is fixed at startup, so the
 node runs that single peer for its whole life and reconnecting means
@@ -196,28 +225,11 @@ The example files pair them the two useful ways:
   works its camera and alignment parameters out from a ZED camera's
   factory calibration.
 
-Both files accept `pose.mode`, read once at startup:
-
-- `neck` (default): positions are relative to the estimated neck pivot;
-  position axes and controller orientation stay aligned with WebXR local space.
-- `relative`: apply the inverse of the current headset pose to both controller
-  position and orientation. The reference updates each frame; it is not latched.
-  Neck offsets and the neck-pivot file are ignored, and `--calibration` is rejected.
-
-```yaml
-pose:
-  mode: neck # neck or relative
-```
-
-Both modes share the robot-frame mapping, end-effector rotation correction,
-filtering, and speed limits. `pose_reference` remains the original headset pose.
-Restart the node after changing the mode.
-
 Both files also take `pose.frame_offset`: the neutral hand position
 relative to the `arm_origin` site in meters, overriding the built-in
 default of `[-0.085, 0, -0.14]`.
 
-In `neck` mode, they also take `pose.neck_pivot_offset`: the operator's eyes to the
+They also take `pose.neck_pivot_offset`: the operator's eyes to the
 neck's rotation axis, in the headset's own frame, overriding the
 built-in default of `[0.0, -0.075, 0.080]`. Hand positions are made
 relative to that pivot rather than to the headset itself, so turning the
@@ -226,6 +238,15 @@ Anatomy varies, so tune it per operator, or measure it as described in
 [Calibrating the neck pivot](#calibrating-the-neck-pivot) below;
 `[0, 0, 0]` goes back to subtracting the headset position. A measured
 offset in `--neck-pivot-file` wins over this one.
+
+(openarm-quest-teleop patch) By default the pivot is taken from every
+frame, so leaning or stepping moves the hand positions with the body.
+`--pivot-mode latched` instead latches the pivot position from the first
+head pose of a session, and again after a gap in head poses longer than
+`--smoother-reset-gap` (a recenter is one): for a relative clutch the
+hand's displacement is then the hand's alone, and head motion while
+gripping moves nothing. The offset in use when the pivot latches is the
+one that applies.
 
 ## Calibrating the neck pivot
 
@@ -298,15 +319,20 @@ You can use [Immersive Web
 Emulator](https://chromewebstore.google.com/detail/immersive-web-emulator/cgffilbpcibhmcfbgggfhfolhkfbhmik)
 and Chrome to debug this node without a VR device.
 
+`tests/web/` (openarm-quest-teleop) runs the page against the node in
+headless Chromium with Meta's IWER emulating a Quest 3; see its README.
+
 ## Inputs
 
 The pose tick is required. Camera inputs are optional.
 
-| Input               | Type      | Description                                                                     |
-| ------------------- | --------- | ------------------------------------------------------------------------------- |
-| `tick`              | any       | Advances hand pose filtering and output, e.g. `dora/timer/millis/2` for 500 Hz. |
-| `camera_head_right` | `uint8[]` | A JPEG image of the robot's head camera.                                        |
-| `camera_head_left`  | `uint8[]` | A JPEG image for the left eye. Only used by the stereo view.                    |
+| Input                | Type      | Description                                                              |
+|----------------------|-----------|--------------------------------------------------------------------------|
+| `tick`               | any       | Advances hand pose filtering and output, e.g. `dora/timer/millis/2` for 500 Hz. |
+| `camera_head_right`  | `uint8[]` | A JPEG image of the robot's head camera.                                 |
+| `camera_head_left`   | `uint8[]` | A JPEG image for the left eye. Only used by the stereo view.             |
+| `hud`                | `string`  | (openarm-quest-teleop patch) JSON `{"lines": [...], "recording": bool, "haptic": "right"\|"left"\|"both"\|null}` drawn on a head-locked panel in the headset; `haptic` pulses that controller. Each message is the whole HUD and goes to the active session's browser only; the last one is repeated, without its haptic, to a browser when its session starts. |
+| `control`            | `string`  | (openarm-quest-teleop patch) `"quit"` shuts the node down the way `STOP` does: peers closed, Web server stopped. Other commands are ignored. |
 
 ## Outputs
 
@@ -315,26 +341,26 @@ grip and joystick outputs are sent on received frames; buttons only when
 included in a frame. `pose_reference` is sent on received frames whenever
 the headset is tracked, even while the controllers are off.
 
-| Output             | Type                       | Description                                                                                                                                                                                                                                                                                                              |
-| ------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `status`           | `string`                   | `"ready"` when a WebXR session is started.                                                                                                                                                                                                                                                                               |
-| `vr_receive_times` | `int64`                    | The timestamp in nanoseconds when a frame is received from the VR device.                                                                                                                                                                                                                                                |
-| `pose_right`       | struct: `pose: float32[8]` | `[x, y, z, qw, qx, qy, qz, gripper]` in the scene's `arm_origin` site frame. Position is in meters; gripper is the mapped trigger angle.                                                                                                                                                                                 |
-| `pose_left`        | struct: `pose: float32[8]` | The left controller, in the same format as `pose_right`.                                                                                                                                                                                                                                                                 |
-| `pose_reference`   | `float32[7]`               | The pose of the headset, in the WebXR reference space (x right, y up, -z forward). The hand poses are made relative to this pose, so it is unrotated and unsmoothed and left in the WebXR frame for consumers that drive something from head motion such as a neck.                                                      |
-| `trigger_right`    | `float32`                  | The value of the right trigger from `0.0` (released) to `1.0` (fully pressed).                                                                                                                                                                                                                                           |
-| `trigger_left`     | `float32`                  | The value of the left trigger from `0.0` (released) to `1.0` (fully pressed).                                                                                                                                                                                                                                            |
-| `grip_right`       | `float32`                  | The value of the right grip (squeeze) button from `0.0` (released) to `1.0` (fully pressed).                                                                                                                                                                                                                             |
-| `grip_left`        | `float32`                  | The value of the left grip. The format is the same as `grip_right`.                                                                                                                                                                                                                                                      |
-| `joystick_x_right` | `float32`                  | The X axis value of the right joystick.                                                                                                                                                                                                                                                                                  |
-| `joystick_y_right` | `float32`                  | The Y axis value of the right joystick.                                                                                                                                                                                                                                                                                  |
-| `joystick_x_left`  | `float32`                  | The X axis value of the left joystick.                                                                                                                                                                                                                                                                                   |
-| `joystick_y_left`  | `float32`                  | The Y axis value of the left joystick.                                                                                                                                                                                                                                                                                   |
-| `button_a`         | `bool`                     | Whether the A button is pressed or not.                                                                                                                                                                                                                                                                                  |
-| `button_b`         | `bool`                     | Whether the B button is pressed or not.                                                                                                                                                                                                                                                                                  |
-| `button_x`         | `bool`                     | Whether the X button is pressed or not.                                                                                                                                                                                                                                                                                  |
-| `button_y`         | `bool`                     | Whether the Y button is pressed or not.                                                                                                                                                                                                                                                                                  |
-| `command`          | `string`                   | `"quit"` when the node exits, if `--quit-button` is given -- whatever ended the node: the quit button, the browser leaving, or an error. A [dora-openarm-quitter](https://github.com/enactic/dora-openarm-quitter) node wired to this output ends the rest of the dataflow with it. Nothing else is ever published here. |
+| Output             | Type              | Description                                                                                                                                    |
+|--------------------|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
+| `status`           | `string`          | `"ready"` when a WebXR session is started.                                                                                                      |
+| `vr_receive_times` | `int64`           | The timestamp in nanoseconds when a frame is received from the VR device.                                                                       |
+| `pose_right`       | struct: `pose: float32[8]` | `[x, y, z, qw, qx, qy, qz, gripper]` in the scene's `arm_origin` site frame. Position is in meters; gripper is the mapped trigger angle. |
+| `pose_left`        | struct: `pose: float32[8]` | The left controller, in the same format as `pose_right`. |
+| `pose_reference`   | `float32[7]`      | The pose of the headset, in the WebXR reference space (x right, y up, -z forward). The hand poses are made relative to this pose, so it is unrotated and unsmoothed and left in the WebXR frame for consumers that drive something from head motion such as a neck. |
+| `trigger_right`    | `float32`         | The value of the right trigger from `0.0` (released) to `1.0` (fully pressed).                                                                  |
+| `trigger_left`     | `float32`         | The value of the left trigger from `0.0` (released) to `1.0` (fully pressed).                                                                   |
+| `grip_right`       | `float32`         | The value of the right grip (squeeze) button from `0.0` (released) to `1.0` (fully pressed).                                                    |
+| `grip_left`        | `float32`         | The value of the left grip. The format is the same as `grip_right`.                                                                             |
+| `joystick_x_right` | `float32`         | The X axis value of the right joystick.                                                                                                         |
+| `joystick_y_right` | `float32`         | The Y axis value of the right joystick.                                                                                                         |
+| `joystick_x_left`  | `float32`         | The X axis value of the left joystick.                                                                                                          |
+| `joystick_y_left`  | `float32`         | The Y axis value of the left joystick.                                                                                                          |
+| `button_a`         | `bool`            | Whether the A button is pressed or not.                                                                                                         |
+| `button_b`         | `bool`            | Whether the B button is pressed or not.                                                                                                         |
+| `button_x`         | `bool`            | Whether the X button is pressed or not.                                                                                                         |
+| `button_y`         | `bool`            | Whether the Y button is pressed or not.                                                                                                         |
+| `command`          | `string`          | `"quit"` when the node exits, if `--quit-button` is given -- whatever ended the node: the quit button, the browser leaving, or an error. A [dora-openarm-quitter](https://github.com/enactic/dora-openarm-quitter) node wired to this output ends the rest of the dataflow with it. Nothing else is ever published here. |
 
 `button_y` is published whatever the press does here. In a session
 started with `--calibration` it also runs a [neck pivot
@@ -350,31 +376,28 @@ options. Each option also has a corresponding environment variable
 that is used as the default value. Setting the environment variable is
 useful in a dora-rs dataflow YAML.
 
-| Option                      | Environment variable      | Default                   | Description                                                                                                                                                                                                                                                                                                          |
-| --------------------------- | ------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--host`                    | `HOST`                    | `0.0.0.0`                 | The host that the Web server listens on.                                                                                                                                                                                                                                                                             |
-| `--port`                    | `PORT`                    | `8443`                    | The port that the Web server listens on.                                                                                                                                                                                                                                                                             |
-| `--tls-certificate-file`    | `TLS_CERTIFICATE_FILE`    | (required)                | The TLS certificate file for HTTPS. Required because WebXR requires HTTPS, unless `--offer` is given.                                                                                                                                                                                                                |
-| `--tls-key-file`            | `TLS_KEY_FILE`            | (required)                | The TLS key file for the certificate file. Required unless `--offer` is given.                                                                                                                                                                                                                                       |
-| `--offer`                   | `OFFER`                   | (none)                    | The browser's SDP offer. Runs the node as a pure WebRTC peer with no HTTP server and no certificate. See [WebRTC-only mode](#webrtc-only-mode).                                                                                                                                                                      |
-| `--answer-host`             | `ANSWER_HOST`             | `127.0.0.1`               | The host to write the SDP answer to in WebRTC-only mode.                                                                                                                                                                                                                                                             |
-| `--answer-port`             | `ANSWER_PORT`             | (required with `--offer`) | The port to write the SDP answer to in WebRTC-only mode.                                                                                                                                                                                                                                                             |
-| `--connect-timeout`         | `CONNECT_TIMEOUT`         | `60`                      | Seconds to wait for the browser to connect in WebRTC-only mode.                                                                                                                                                                                                                                                      |
-| `--quit-button`             | `QUIT_BUTTON`             | (none)                    | The controller button (`a`, `b`, `x` or `y`) that shuts the node down when pressed. Giving this option also publishes `"quit"` on the `command` output whenever the node exits, even by an error rather than the button. May be repeated for several buttons; the environment variable takes a comma-separated list. |
-| `--view-configuration-file` | `VIEW_CONFIGURATION_FILE` | (none)                    | The YAML file that describes how the head camera is drawn in the VR device. Read once when the node starts.                                                                                                                                                                                                          |
-| `--video-workers`           | `VIDEO_WORKERS`           | `0`                       | Worker threads for JPEG decoding and WebRTC encoding; `0` keeps asyncio's default.                                                                                                                                                                                                                                   |
-| `--calibration`             | `CALIBRATION`             | off                       | Measure the neck pivot with the Y button, and show the instructions for it in the headset. Off unless asked for.                                                                                                                                                                                                     |
-| `--neck-pivot-file`         | `NECK_PIVOT_FILE`         | `neck_pivot.yaml`         | The YAML file a measured neck pivot offset is written to, and read back from at startup.                                                                                                                                                                                                                             |
-| `--max-linear-speed`        | `MAX_LINEAR_SPEED`        | `1.0`                     | Maximum filtered hand translation speed in m/s; 0 disables the limit.                                                                                                                                                                                                                                                |
-| `--max-angular-speed`       | `MAX_ANGULAR_SPEED`       | `6.0`                     | Maximum filtered hand rotation speed in rad/s; 0 disables the limit.                                                                                                                                                                                                                                                 |
-| `--pose-timeout`            | `POSE_TIMEOUT`            | `0`                       | Seconds without a new accepted XR frame before pausing hand poses; 0 disables the timeout.                                                                                                                                                                                                                           |
-
-Dora input waits use a separate single-thread executor, so they do not queue
-behind video jobs. For a CPU-constrained deployment, set `VIDEO_WORKERS` on the
-WebXR node (for example, `4`) and measure video latency and pose output rate.
-This limits the shared asyncio worker pool.
-It does not change resolution, frame rate, bitrate or quality settings. Leave
-it at `0` unless measurements justify a limit.
+| Option                   | Environment variable   | Default     | Description                                                                       |
+|--------------------------|------------------------|-------------|-----------------------------------------------------------------------------------|
+| `--host`                 | `HOST`                 | `0.0.0.0`   | The host that the Web server listens on.                                          |
+| `--port`                 | `PORT`                 | `8443`      | The port that the Web server listens on.                                          |
+| `--tls-certificate-file` | `TLS_CERTIFICATE_FILE` | (required)  | The TLS certificate file for HTTPS. Required because WebXR requires HTTPS, unless `--offer` is given. |
+| `--tls-key-file`         | `TLS_KEY_FILE`         | (required)  | The TLS key file for the certificate file. Required unless `--offer` is given.    |
+| `--offer`                | `OFFER`                | (none)      | The browser's SDP offer. Runs the node as a pure WebRTC peer with no HTTP server and no certificate. See [WebRTC-only mode](#webrtc-only-mode). |
+| `--answer-host`          | `ANSWER_HOST`          | `127.0.0.1` | The host to write the SDP answer to in WebRTC-only mode.                          |
+| `--answer-port`          | `ANSWER_PORT`          | (required with `--offer`) | The port to write the SDP answer to in WebRTC-only mode.            |
+| `--connect-timeout`      | `CONNECT_TIMEOUT`      | `60`        | Seconds to wait for the browser to connect in WebRTC-only mode.                   |
+| `--quit-button`          | `QUIT_BUTTON`          | (none)      | The controller button (`a`, `b`, `x` or `y`) that shuts the node down when pressed. Giving this option also publishes `"quit"` on the `command` output whenever the node exits, even by an error rather than the button. May be repeated for several buttons; the environment variable takes a comma-separated list. |
+| `--view-configuration-file` | `VIEW_CONFIGURATION_FILE` | (none)  | The YAML file that describes how the head camera is drawn in the VR device. Read once when the node starts. |
+| `--calibration`          | `CALIBRATION`          | off         | Measure the neck pivot with the Y button, and show the instructions for it in the headset. Off unless asked for. |
+| `--neck-pivot-file`      | `NECK_PIVOT_FILE`      | `neck_pivot.yaml` | The YAML file a measured neck pivot offset is written to, and read back from at startup. |
+| `--max-linear-speed`    | `MAX_LINEAR_SPEED`    | `1.0`       | Maximum filtered hand translation speed in m/s; 0 disables the limit. |
+| `--max-angular-speed`   | `MAX_ANGULAR_SPEED`   | `6.0`       | Maximum filtered hand rotation speed in rad/s; 0 disables the limit. |
+| `--pose-timeout`        | `POSE_TIMEOUT`        | `0`         | Seconds without a new accepted XR frame before pausing hand poses; 0 disables the timeout. |
+| `--one-euro-min-cutoff` | `ONE_EURO_MIN_CUTOFF` | `2.0`       | (openarm-quest-teleop patch) One Euro filter minimum cutoff in Hz; higher lags less and jitters more. Must be positive. |
+| `--one-euro-beta`       | `ONE_EURO_BETA`       | `0.04`      | (openarm-quest-teleop patch) One Euro filter speed coefficient. |
+| `--smoother-reset-gap`  | `SMOOTHER_RESET_GAP`  | `0.1`       | (openarm-quest-teleop patch) Seconds of missing hand input after which the hand's filter is reset instead of resumed; must be positive. Also the head-pose gap that re-latches a latched pivot. |
+| `--pivot-mode`          | `PIVOT_MODE`          | `live`      | (openarm-quest-teleop patch) `live` makes hands relative to the neck pivot of every frame; `latched` to the pivot latched at session start and after gaps, so head motion does not move them. |
+| (none)                  | `PAIRING_TOKEN`       | (none)      | (openarm-quest-teleop patch) The token `POST /offer` must carry (`{"sdp": ..., "token": ...}`; the page sends the one in its URL's `#k=` fragment). Wrong or missing is HTTP 403. Environment only, so it never appears in the process list. Unset accepts every offer and warns once. |
 
 ## License
 

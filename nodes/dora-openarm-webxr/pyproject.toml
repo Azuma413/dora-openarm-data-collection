@@ -14,7 +14,7 @@
 
 [project]
 name = "dora-openarm-webxr"
-version = "0.6.1"
+version = "0.6.0"
 authors = [{ name = "Enactic, Inc." }]
 description = "dora-rs node that provides WebXR server for VR OpenArm teleoperation"
 license = { text = "Apache-2.0" }
@@ -23,7 +23,7 @@ requires-python = ">=3.11"
 
 dependencies = [
   "aiortc >= 1.9",
-  "dora-rs >= 0.5.0",
+  "dora-rs >= 0.5.0, <= 1.0.1",
   "fastapi",
   "pyyaml",
   "scipy",
@@ -40,7 +40,7 @@ dora-openarm-webxr = "dora_openarm_webxr.main:main"
 
 [dependency-groups]
 dev = [
-  "dora-rs-cli>=0.5.0",
+  "dora-rs-cli>=0.5.0, <= 1.0.1",
   "pytest >= 8.1.1",
   "ruff == 0.14.11", # sync with .pre-commit-config.yaml
 ]
@@ -57,6 +57,11 @@ where = ["src"]
     "*.css",
     "*.html",
     "*.js",
+    # openarm-quest-teleop patch 15: the vendored three.js the 3D view imports,
+    # with the licence and provenance that must ship beside it. Without this
+    # line a built wheel serves a page whose `import "./three/..."` 404s, and
+    # the 3D view falls back to the camera panel on an installed node only.
+    "three/*",
 ]
 
 [tool.ruff.lint]
