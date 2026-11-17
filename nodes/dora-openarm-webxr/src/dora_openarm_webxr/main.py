@@ -74,6 +74,29 @@ _MAX_LINEAR_SPEED = 1.0
 _MAX_ANGULAR_SPEED = 6.0
 _POSE_TIMEOUT = 0.0
 _POSE_MODE = "neck"
+# Per side, an orientation [qw, qx, qy, qz] in the arm_origin frame that
+# replaces the controller's, so IK holds that hand's orientation fixed while
+# its position still follows the controller. scripts/ee-orientation.py reads
+# one off a recorded episode.
+_FIXED_ORIENTATIONS: dict = {}
+
+# Clutched relative control, from --clutch. Off, each hand pose maps onto the
+# robot absolutely, as the upstream node does. On, a hand drives its arm only
+# while its grip is squeezed, and then by how far it has moved since the
+# squeeze rather than by where it is: letting go holds the arm where it is, so
+# the operator can bring the hand back somewhere comfortable and squeeze again
+# to carry on from there. That is also what makes a scale below one usable --
+# the reach it gives up comes back by clutching.
+_CLUTCH = False
+# Robot motion per hand motion while clutched, from --position-scale and
+# --rotation-scale. Below one, a hand's tremor and overshoot shrink with it,
+# which is what fine positioning needs.
+_POSITION_SCALE = 1.0
+_ROTATION_SCALE = 1.0
+# The grip engages above the first value and releases below the second. The
+# gap keeps a grip held near one threshold from chattering the arm on and off.
+_CLUTCH_ENGAGE = 0.6
+_CLUTCH_RELEASE = 0.4
 
 
 # Relative pose to robot workspace mapping.
@@ -476,6 +499,16 @@ def _adjust_pose(pose, reference, smoother, smoother_time):
       * right-handed
       * [x, y, z, qw, qx, qy, qz]
     """
+    position, rotation = _map_pose(pose, reference)
+    return pa.array(smoother.smooth(smoother_time, _pack_pose(position, rotation)))
+
+
+def _map_pose(pose, reference):
+    """Map a WebXR hand pose onto the arm_origin frame, unsmoothed.
+
+    Returns the position and the end effector rotation; see
+    ``_adjust_pose`` for the frames.
+    """
     reference_rotation = Rotation.from_quat(
         [reference["qx"], reference["qy"], reference["qz"], reference["qw"]]
     )
@@ -495,9 +528,13 @@ def _adjust_pose(pose, reference, smoother, smoother_time):
 
     position = _ROBOT_ROTATION.apply(position) + _FRAME_OFFSET_CELL
     rotation = _ROBOT_ROTATION * rotation * _CONTROLLER_TO_EE
-    quaternion = rotation.as_quat()
+    return position, rotation
 
-    adjusted_pose = np.array(
+
+def _pack_pose(position, rotation):
+    """Lay a position and rotation out as ``[x, y, z, qw, qx, qy, qz]``."""
+    quaternion = rotation.as_quat()
+    return np.array(
         [
             position[0],  # x
             position[1],  # y
@@ -509,7 +546,63 @@ def _adjust_pose(pose, reference, smoother, smoother_time):
         ],
         dtype=np.float32,
     )
-    return pa.array(smoother.smooth(smoother_time, adjusted_pose))
+
+
+class _Clutch:
+    """One hand's clutched relative control.
+
+    While engaged, the target is where it was at the squeeze, moved by the
+    hand's motion since then, scaled. Released, the target stays where the
+    hand left it.
+
+    The very first squeeze has nothing to be relative to -- this node never
+    hears where the arm is -- so it takes the hand's absolute target, which
+    is where the unclutched node would have sent the arm anyway. Every later
+    squeeze, reconnections included, continues from the held target, so the
+    arm does not jump once it has been driven.
+    """
+
+    def __init__(self):
+        """Start released with no target yet."""
+        self.engaged = False
+        self.target = None
+        self._hand = None
+        self._anchor = None
+
+    def release(self):
+        """Let go, holding the current target."""
+        self.engaged = False
+
+    def update(self, grip, position, rotation):
+        """Take a grip value and a mapped hand pose, returning the target.
+
+        Returns ``(position, rotation)``, or None until the first squeeze.
+        """
+        position = np.asarray(position, dtype=np.float64)
+        threshold = _CLUTCH_RELEASE if self.engaged else _CLUTCH_ENGAGE
+        engaged = grip is not None and grip > threshold
+        if engaged and not self.engaged:
+            self._hand = (position, rotation)
+            self._anchor = self.target or self._hand
+        self.engaged = engaged
+        if engaged:
+            hand_position, hand_rotation = self._hand
+            anchor_position, anchor_rotation = self._anchor
+            # The turn is taken in the robot frame and applied on the left,
+            # so the gripper turns about the same axis the hand did.
+            turn = rotation * hand_rotation.inv()
+            if _ROTATION_SCALE != 1.0:
+                turn = Rotation.from_rotvec(turn.as_rotvec() * _ROTATION_SCALE)
+            self.target = (
+                anchor_position + _POSITION_SCALE * (position - hand_position),
+                turn * anchor_rotation,
+            )
+        return self.target
+
+
+# Per side, kept across sessions: the arm stays where it was while a browser
+# reconnects, and so must the target it continues from.
+_clutches = {side: _Clutch() for side in ("right", "left")}
 
 
 _POSE_STRUCT_TYPE = pa.struct({"pose": pa.list_(pa.float32())})
@@ -682,9 +775,25 @@ def _publish_poses(state):
             or trigger is None
             or state.pivot_calibration.collecting
         ):
+            # A squeeze held across the gap would carry the hand's travel
+            # during it into the arm, so the operator squeezes again instead.
+            _clutches[side].release()
             smoother.suspend(now)
             continue
-        adjusted_pose = _adjust_pose(pose, reference, smoother, now)
+        if _CLUTCH:
+            target = _clutches[side].update(
+                response.get(f"grip_{side}"), *_map_pose(pose, reference)
+            )
+            if target is None:
+                smoother.suspend(now)
+                continue
+            adjusted_pose = smoother.smooth(now, _pack_pose(*target))
+        else:
+            adjusted_pose = _adjust_pose(pose, reference, smoother, now)
+        fixed_orientation = _FIXED_ORIENTATIONS.get(side)
+        if fixed_orientation is not None:
+            adjusted_pose = np.asarray(adjusted_pose, dtype=np.float32).copy()
+            adjusted_pose[3:7] = fixed_orientation
         gripper_angle = _map_trigger_to_gripper(trigger, side)
         node.send_output(
             f"pose_{side}",
@@ -708,6 +817,8 @@ def _on_session_start():
 def _on_session_end():
     """Invalidate the active session's cached targets."""
     _state.latest_frame = None
+    for clutch in _clutches.values():
+        clutch.release()
     now = time.perf_counter()
     for smoother in _state.smoothers.values():
         smoother.suspend(now)
@@ -1032,6 +1143,38 @@ def main():
         default=float(os.getenv("POSE_TIMEOUT", "0")),
         help="Pause hand pose output after this many seconds without a new frame; 0 disables it (default).",
     )
+    parser.add_argument(
+        "--clutch",
+        action="store_true",
+        default=_environment_flag("CLUTCH"),
+        help=(
+            "Drive each arm only while its grip is squeezed, by the hand's "
+            "motion since the squeeze; releasing holds the arm (default: off)"
+        ),
+    )
+    parser.add_argument(
+        "--position-scale",
+        type=float,
+        default=float(os.getenv("POSITION_SCALE", "1.0")),
+        help="Robot translation per hand translation with --clutch (default: 1.0)",
+    )
+    parser.add_argument(
+        "--rotation-scale",
+        type=float,
+        default=float(os.getenv("ROTATION_SCALE", "1.0")),
+        help="Robot rotation per hand rotation with --clutch (default: 1.0)",
+    )
+    for side in ("left", "right"):
+        parser.add_argument(
+            f"--fixed-orientation-{side}",
+            default=os.getenv(f"FIXED_ORIENTATION_{side.upper()}", ""),
+            metavar="QW,QX,QY,QZ",
+            help=(
+                f"Hold the {side} hand at this orientation in the arm_origin "
+                "frame, ignoring the controller's; empty follows the "
+                "controller (default). See scripts/ee-orientation.py."
+            ),
+        )
     video.add_arguments(parser)
 
     global args
@@ -1046,6 +1189,27 @@ def main():
     _MAX_LINEAR_SPEED = args.max_linear_speed
     _MAX_ANGULAR_SPEED = args.max_angular_speed
     _POSE_TIMEOUT = args.pose_timeout
+    for option in ("position_scale", "rotation_scale"):
+        value = getattr(args, option)
+        if not np.isfinite(value) or value <= 0.0:
+            parser.error(f"--{option.replace('_', '-')} must be positive")
+    global _CLUTCH, _POSITION_SCALE, _ROTATION_SCALE
+    _CLUTCH = args.clutch
+    _POSITION_SCALE = args.position_scale
+    _ROTATION_SCALE = args.rotation_scale
+    for side in ("left", "right"):
+        option = f"--fixed-orientation-{side}"
+        text = getattr(args, f"fixed_orientation_{side}").strip()
+        if not text:
+            continue
+        try:
+            quaternion = np.array([float(v) for v in text.split(",")], dtype=np.float64)
+        except ValueError:
+            parser.error(f"{option} must be four numbers qw,qx,qy,qz")
+        norm = np.linalg.norm(quaternion) if quaternion.shape == (4,) else 0.0
+        if not np.isfinite(norm) or norm < 1e-6:
+            parser.error(f"{option} must be a nonzero quaternion qw,qx,qy,qz")
+        _FIXED_ORIENTATIONS[side] = (quaternion / norm).astype(np.float32)
 
     # argparse cannot express "required unless another option is given",
     # and WebXR only runs on an HTTPS page, so the certificate is required

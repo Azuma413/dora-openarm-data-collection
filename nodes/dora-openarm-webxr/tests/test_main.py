@@ -528,3 +528,98 @@ def test_negative_video_workers_rejected(monkeypatch, capsys):
         main.main()
     assert error.value.code == 2
     assert "--video-workers must be non-negative" in capsys.readouterr().err
+
+
+@pytest.fixture
+def clutch(node, monkeypatch):
+    monkeypatch.setattr(main, "_CLUTCH", True)
+    monkeypatch.setattr(main, "_POSE_MODE", "neck")
+    monkeypatch.setattr(
+        main, "_clutches", {side: main._Clutch() for side in ("right", "left")}
+    )
+    # Smoothing off, so a published pose is the clutch target itself.
+    clock = [1.0]
+    monkeypatch.setattr(main.time, "perf_counter", lambda: clock[0])
+    state = main._ConnectionState()
+    for smoother in state.smoothers.values():
+        smoother.smooth = lambda t, pose: pose
+    return state
+
+
+def _clutch_frame(sequence, x, grip, angle=0.0):
+    frame = _hand_frame(sequence)
+    frame["pose_right"] = _pose(
+        [x, 0.0, 0.0], main.Rotation.from_euler("y", angle, degrees=True)
+    )
+    frame["grip_right"] = grip
+    return frame
+
+
+def _published_right(node):
+    values = [value for output_id, value in node.outputs if output_id == "pose_right"]
+    return np.asarray(values[-1][0]["pose"].as_py()) if values else None
+
+
+def test_clutch_publishes_nothing_before_first_squeeze(node, clutch):
+    main._process_frame(_clutch_frame(1, 0.3, grip=0.0), clutch)
+    main._publish_poses(clutch)
+    assert "pose_right" not in node.ids()
+
+
+def test_clutch_holds_and_continues_from_held_target(node, clutch, monkeypatch):
+    monkeypatch.setattr(main, "_POSITION_SCALE", 0.5)
+    # First squeeze: the absolute target, as without the clutch.
+    main._process_frame(_clutch_frame(1, 0.0, grip=1.0), clutch)
+    main._publish_poses(clutch)
+    start = _published_right(node)[:3].copy()
+    # Hand moves 0.2 along WebXR x while squeezed: the arm moves half.
+    main._process_frame(_clutch_frame(2, 0.2, grip=1.0), clutch)
+    main._publish_poses(clutch)
+    moved = _published_right(node)[:3]
+    step = main._ROBOT_ROTATION.apply([0.1, 0.0, 0.0])
+    np.testing.assert_allclose(moved - start, step, atol=1e-6)
+    # Released and brought back: the arm stays.
+    main._process_frame(_clutch_frame(3, 0.0, grip=0.0), clutch)
+    main._publish_poses(clutch)
+    np.testing.assert_allclose(_published_right(node)[:3], moved, atol=1e-6)
+    # Squeezed again from there: continues from the held target.
+    main._process_frame(_clutch_frame(4, 0.0, grip=1.0), clutch)
+    main._publish_poses(clutch)
+    main._process_frame(_clutch_frame(5, 0.2, grip=1.0), clutch)
+    main._publish_poses(clutch)
+    np.testing.assert_allclose(_published_right(node)[:3], moved + step, atol=1e-6)
+
+
+def test_clutch_grip_hysteresis(node, clutch):
+    main._process_frame(_clutch_frame(1, 0.0, grip=0.5), clutch)
+    main._publish_poses(clutch)
+    assert not main._clutches["right"].engaged
+    main._process_frame(_clutch_frame(2, 0.0, grip=0.7), clutch)
+    main._publish_poses(clutch)
+    main._process_frame(_clutch_frame(3, 0.0, grip=0.5), clutch)
+    main._publish_poses(clutch)
+    assert main._clutches["right"].engaged
+    main._process_frame(_clutch_frame(4, 0.0, grip=0.3), clutch)
+    main._publish_poses(clutch)
+    assert not main._clutches["right"].engaged
+
+
+def test_clutch_scales_rotation(node, clutch, monkeypatch):
+    monkeypatch.setattr(main, "_ROTATION_SCALE", 0.5)
+    main._process_frame(_clutch_frame(1, 0.0, grip=1.0), clutch)
+    main._publish_poses(clutch)
+    start = _published_right(node)[3:7]
+    main._process_frame(_clutch_frame(2, 0.0, grip=1.0, angle=40.0), clutch)
+    main._publish_poses(clutch)
+    end = _published_right(node)[3:7]
+    angle = 2 * np.degrees(np.arccos(min(1.0, abs(float(start @ end)))))
+    assert angle == pytest.approx(20.0, abs=1e-3)
+
+
+def test_clutch_released_on_session_end(node, clutch, monkeypatch):
+    monkeypatch.setattr(main, "_state", clutch)
+    main._process_frame(_clutch_frame(1, 0.0, grip=1.0), clutch)
+    main._publish_poses(clutch)
+    main._on_session_end()
+    assert not main._clutches["right"].engaged
+    assert main._clutches["right"].target is not None

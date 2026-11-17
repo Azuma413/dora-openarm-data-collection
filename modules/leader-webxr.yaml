@@ -42,6 +42,17 @@ nodes:
       TLS_CERTIFICATE_FILE: "nodes/dora-openarm-webxr/example/server.crt"
       TLS_KEY_FILE: "nodes/dora-openarm-webxr/example/server.key"
       VIEW_CONFIGURATION_FILE: "view-webxr.yaml"
+      # Clutch: an arm follows its hand only while that grip is squeezed, by
+      # the hand's motion since the squeeze; let go to hold the arm and
+      # reposition the hand. The first squeeze snaps to the absolute target.
+      CLUTCH: "true"
+      # Robot motion per hand motion while clutched; below 1 for finer work.
+      POSITION_SCALE: "0.5"
+      ROTATION_SCALE: "1.0"
+      # Hold the left hand at a fixed orientation for IK (qw,qx,qy,qz in the
+      # arm_origin frame); empty follows the controller. Pick it from a
+      # recorded frame with scripts/ee-orientation.py.
+      FIXED_ORIENTATION_LEFT: ""
     inputs:
       # WebXR stops when all its inputs are closed on Quit.
       tick: _mod/tick
