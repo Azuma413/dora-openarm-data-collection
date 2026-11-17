@@ -1,0 +1,82 @@
+# Joint-space safety gate limits (dora-openarm-gate, docs/teleop.md). Shared by the sim and
+# real profiles so the gate behaves the same in both.
+#
+# Portions derived from enactic/openarm_driver and enactic/openarm_mujoco (Apache-2.0).
+#
+# Every position range is the NARROWEST of these three sources (radians, driver frame =
+# MJCF joint frame for the pedestal config, whose joint_offsets are all zero):
+#   [D]  openarm_driver 05f0f02  src/openarm_driver/configs/openarm_pedestal.yaml
+#          joint_limits.right_arm :20-27, left_arm :30-37
+#   [P]  openarm_driver 0.3.0 (PyPI, what `pip install openarm-driver==0.3.0` ships)
+#          openarm_driver/configs/openarm_pedestal.yaml
+#          joint_limits.right_arm :20-27, left_arm :30-37  (J1/J2 much narrower than [D])
+#   [M]  openarm_mujoco ce761e2  v2/openarm_bimanual.xml
+#          right joints :264,271,278,285,292,301,308  finger :317, actuator ctrlrange :366
+#          left  joints :176,183,190,197,204,213,220  finger :229, actuator ctrlrange :358
+#
+# The gate clamps the arm joints (J1-J7) to [lower + limit_margin, upper - limit_margin]
+# (limit_margin 0.05 rad by default) and the gripper (J8) to [lower + gripper_margin,
+# upper - gripper_margin] (gripper_margin 0 by default: closing onto 0 is the grasp).
+# An IK solution more than jump_tol past that arm range holds the gate (reason ik_limit),
+# so the IK is given the same J1-J7 ranges: ik_model.write_ik_model copies its MJCF
+# with these ranges minus limit_margin, and the launcher passes it as `--xml`.
+# The gripper range is the MJCF range: [D]/[P] allow J8 up to 60 deg open and 0.4 rad
+# past closed, but the sim finger stops at 45 deg and the clutch already clips to it
+# (docs/teleop.md, Clutch). Whether the real J8 angle has the same scale is NOT verified.
+# These ranges come from the pedestal config; the Cell configs are NOT checked against them.
+
+joint_limits:
+  right:
+    - [-1.3, 2.0]            # joint1  [P]:20   ([D]:20 and [M]:264 are -1.3963 3.4907)
+    - [-0.17453, 2.0]        # joint2  [P]:21 upper; [D]:21/[M]:271 lower (-0.174533 in [P])
+    - [-1.570796, 1.570796]  # joint3  [P]:22   ([D]:22/[M]:278 are +-1.5708)
+    - [0.0, 2.443461]        # joint4  [P]:23   ([D]:23/[M]:285 upper 2.4435)
+    - [-1.570796, 1.570796]  # joint5  [P]:24   ([D]:24/[M]:292 are +-1.5708)
+    - [-0.785398, 0.785398]  # joint6  [P]:25   ([D]:25/[M]:301 are +-0.7854)
+    - [-1.570796, 1.570796]  # joint7  [P]:26   ([D]:26/[M]:308 are +-1.5708)
+    - [-0.7854, 0.0]         # gripper [M]:317,366 ([D]:27 is -1.0472 0.4, [P]:27 -1.047198 0.4)
+  left:
+    - [-2.0, 1.396263]       # joint1  [P]:30   ([D]:30/[M]:176 are -3.4907 1.3963)
+    - [-2.0, 0.17453]        # joint2  [P]:31 lower; [D]:31/[M]:183 upper (0.174533 in [P])
+    - [-1.570796, 1.570796]  # joint3  [P]:32
+    - [0.0, 2.443461]        # joint4  [P]:33
+    - [-1.570796, 1.570796]  # joint5  [P]:34
+    - [-0.785398, 0.785398]  # joint6  [P]:35
+    - [-1.570796, 1.570796]  # joint7  [P]:36
+    - [0.0, 0.7854]          # gripper [M]:229,358 ([D]:37 is -0.4 1.0472, [P]:37 -0.4 1.047198)
+
+# Unscaled per-joint command velocity caps (rad/s), identical in [D]:56-63 and [P]:56-63.
+# The gate multiplies these by velocity_scale (sim 0.8, real 0.5), so on the real robot the
+# driver's own JointVelocityChecker keeps 2x headroom and never has to clamp.
+# The IK gets 0.9 x the gate's caps for J1-J7 (ik_model.write_ik_config, written by
+# dora-openarm-teleop-ik into its cache and passed as --config): its built-in --limit-velocity caps,
+# 2.0 2.0 3.14 3.14 6.3 6.3 6.3 (openarm_control 973c2d7 src/openarm_control/config.py:46-54),
+# are faster than the gate, which then clipped every tick of a fast reach.
+joint_velocity_limits: [2.0, 2.0, 3.3, 3.3, 6.3, 6.3, 6.3, 20.0]
+
+# Reset pose used by control=reset when no reset_position has been received (the real
+# robot has none). Equals the driver start/stop pose ([D]:94-95, 104-105) and the MJCF
+# "home" keyframe (openarm_mujoco ce761e2 v2/cell/cell.xml:95-98).
+home:
+  right: [0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0, 0.0]
+  left: [0.0, 0.0, 0.0, 1.5707963267948966, 0.0, 0.0, 0.0, 0.0]
+
+# How far the measured pose may be from the gate's command `c` (rad, worst of J1-J7) and
+# still count as "the arm is following the command". The gate refuses to engage past it
+# (`holding(not_tracking)`) and stops its pre-engage ramp there, so this value is also the
+# bound on how far the ramp can pull `c` away from an arm that is not moving at all
+# (stuck, disabled, e-stopped, held by a hand).
+#
+# It is NOT a tracking-accuracy target: a PD-only arm is always some way behind its
+# command, because the driver sends MIT kp/kd with tau = 0 and nothing anywhere feeds
+# gravity forward ([D] src/openarm_driver/driver.py:209-218). With [D]/[P]'s own gains
+# (kp [70, 70, 70, 60, 10, 10, 10, 10]) the steady-state joint error measured in MuJoCo is
+# 72 mrad at home, 130 mrad with the elbow out, and 154-158 mrad with the arm extended or
+# reaching low; the wrist joints alone lag a fast move by ~170 mrad. These values are
+# ~1.6x the worst measured sag, and both are far below the `jump_tol` 0.2 rad + 1.0 rad
+# that openarm_driver's JointDeltaPosChecker allows between consecutive commands.
+# Comparing the IK with the measured pose at engage_tol 0.1 rad instead (what the gate did
+# before) is unreachable at any of those poses, on the real arm as well as in the sim.
+gate_tracking_tol:
+  sim: 0.25
+  real: 0.30

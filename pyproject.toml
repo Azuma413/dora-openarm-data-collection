@@ -30,6 +30,7 @@ dependencies = [
     "dora-openarm-kinematics",
     "dora-openarm-mujoco",
     "dora-openarm-quitter",
+    "dora-openarm-teleop",
     "dora-openarm-vr",
     "dora-openarm-webxr",
     "dora-openarm-zed",
@@ -60,6 +61,7 @@ dora-openarm-ker = { path = "nodes/dora-openarm-ker", editable = true }
 dora-openarm-kinematics = { path = "nodes/dora-openarm-kinematics", editable = true }
 dora-openarm-mujoco = { path = "nodes/dora-openarm-mujoco", editable = true }
 dora-openarm-quitter = { path = "nodes/dora-openarm-quitter", editable = true }
+dora-openarm-teleop = { path = "nodes/dora-openarm-teleop", editable = true }
 dora-openarm-vr = { path = "nodes/dora-openarm-vr", editable = true }
 dora-openarm-webxr = { path = "nodes/dora-openarm-webxr", editable = true }
 dora-openarm-zed = { path = "nodes/dora-openarm-zed", editable = true }
@@ -67,3 +69,15 @@ dora-opencv-image-splitter = { path = "nodes/dora-opencv-image-splitter", editab
 # The ZED Python API is not on PyPI. Stereolabs hosts one wheel per ZED SDK
 # major.minor; the wheel only needs the SDK's libraries at import time.
 pyzed = { url = "https://download.stereolabs.com/zedsdk/5.3/whl/linux_x86_64/pyzed-5.3-cp312-cp312-linux_x86_64.whl" }
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not e2e'"
+markers = ["e2e: runs a real dora dataflow (about 15 s each)"]
+asyncio_default_fixture_loop_scope = "function"

@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: dora-openarm-teleop
+Version: 0.1.0
+Summary: dora-rs nodes that make OpenArm VR teleoperation safe and responsive: grip clutch, joint-space safety gate, tuned IK launcher and headset HUD
+License: Apache-2.0
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: dora-rs<=1.0.1,>=0.5.0
+Requires-Dist: dora-openarm-kinematics
+Requires-Dist: mujoco>=3.6.0
+Requires-Dist: numpy>=2.0
+Requires-Dist: openarm-mujoco>=2.0.1
+Requires-Dist: pyarrow
+Requires-Dist: pyyaml
+Provides-Extra: tls
+Requires-Dist: cryptography; extra == "tls"

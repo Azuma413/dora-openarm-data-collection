@@ -1,0 +1,39 @@
+[project]
+name = "dora-openarm-teleop"
+version = "0.1.0"
+description = "dora-rs nodes that make OpenArm VR teleoperation safe and responsive: grip clutch, joint-space safety gate, tuned IK launcher and headset HUD"
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+  "dora-rs >= 0.5.0, <= 1.0.1",
+  "dora-openarm-kinematics",
+  "mujoco >= 3.6.0",
+  "numpy >= 2.0",
+  "openarm-mujoco >= 2.0.1",
+  "pyarrow",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+# scripts/webxr-setup prefers it over the openssl command line.
+tls = ["cryptography"]
+
+[project.scripts]
+dora-openarm-clutch = "dora_openarm_teleop.clutch_node:main"
+dora-openarm-gate = "dora_openarm_teleop.gate_node:main"
+dora-openarm-teleop-ik = "dora_openarm_teleop.ik_node:main"
+dora-openarm-teleop-hud = "dora_openarm_teleop.hud_node:main"
+openarm-teleop-check = "dora_openarm_teleop.check:main"
+openarm-teleop-tls = "dora_openarm_teleop.tls:main"
+
+[build-system]
+requires = ["setuptools >= 61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+dora_openarm_teleop = ["joint_limits.yaml"]
+
+[tool.ruff]
+line-length = 100
