@@ -87,8 +87,31 @@ def main() -> None:
     dataflow = Path(args[index])
     expanded = dataflow.with_name(f"{dataflow.stem}.envsubst{dataflow.suffix}")
     expanded.write_text(expand(dataflow.read_text()))
+    if args[0] in ("run", "start", "build") and not os.environ.get("SKIP_TELEOP_CHECK"):
+        check(expanded)
     args[index] = str(expanded)
     os.execvp("dora", ["dora", *args])
+
+
+def check(dataflow: Path) -> None:
+    """Refuse to start a dataflow whose teleop nodes disagree (docs/teleop.md).
+
+    SKIP_TELEOP_CHECK=1 skips it, e.g. without the teleop package installed.
+    """
+    try:
+        from dora_openarm_teleop.check import check as check_teleop
+    except ImportError:
+        print(
+            "dora-envsubst: dora_openarm_teleop is not installed; "
+            "run `uv sync` or set SKIP_TELEOP_CHECK=1",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    errors = check_teleop(dataflow, os.environ)
+    for error in errors:
+        print(f"dora-envsubst: {error}", file=sys.stderr)
+    if errors:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

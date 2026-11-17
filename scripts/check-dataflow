@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Check the teleop couplings of a dataflow without running it.
+
+    LEADER=webxr ROBOT=mujoco scripts/check-dataflow dataflow.yaml
+
+scripts/dora-envsubst runs the same check before `dora run`. See docs/teleop.md.
+"""
+
+from dora_openarm_teleop.check import main
+
+if __name__ == "__main__":
+    main()

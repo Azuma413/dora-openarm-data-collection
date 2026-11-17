@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Create tls/ (CA, server certificate, pairing token) and print the headset URLs.
+
+    scripts/webxr-setup                  # once per machine
+    scripts/webxr-setup --rotate-token   # every saved headset URL stops working
+    scripts/webxr-setup --force          # new certificates, e.g. after an IP change
+
+See docs/teleop.md, "Headset setup".
+"""
+
+from dora_openarm_teleop.tls import main
+
+if __name__ == "__main__":
+    main()

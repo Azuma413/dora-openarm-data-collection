@@ -12,15 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# LEADER=webxr: the headset browser sends controller poses over HTTPS 8443 and
-# IK turns them into joint positions.
-# See leader-ker.yaml for the common inputs and outputs.
+
+# LEADER=webxr: a Meta Quest in the browser sends controller poses over HTTPS
+# 8443. They go through a grip clutch, the IK and a joint-space safety gate
+# before they reach the robot:
+#
+#   webxr --pose/grip--> clutch --target--> ik --position--> gate --cmd--> robot
+#                          |                                   ^
+#                          +--clutch_state--> hud <--gate_state+    (state_* from the robot)
+#
+# See docs/teleop.md for why each stage exists and where its numbers come
+# from, and leader-ker.yaml for the inputs and outputs common to all leaders.
+# scripts/dora-envsubst runs the teleop check on this module before
+# `dora run`: the timing and rate couplings below are checked, not hoped for.
 module:
   name: leader-webxr
   inputs:
     - tick
     - camera_head_left
     - camera_head_right
+    - command
+    - state_right
+    - state_left
   outputs:
     - follower_position_right
     - follower_position_left
@@ -39,9 +52,24 @@ nodes:
   - id: webxr
     path: ../dora-openarm-webxr
     env:
-      TLS_CERTIFICATE_FILE: "nodes/dora-openarm-webxr/example/server.crt"
-      TLS_KEY_FILE: "nodes/dora-openarm-webxr/example/server.key"
+      # scripts/webxr-setup writes these and prints the URL to open.
+      TLS_CERTIFICATE_FILE: "tls/server.crt"
+      TLS_KEY_FILE: "tls/server.key"
+      PAIRING_TOKEN_FILE: "tls/pairing_token"
       VIEW_CONFIGURATION_FILE: "view-webxr.yaml"
+      # On a LAN the host candidates connect; a STUN server only adds a round
+      # trip. A page on https://localhost (USB) relays through
+      # scripts/webxr-usb instead (nodes/dora-openarm-webxr/PATCHES.md 18).
+      ICE_SERVERS: "[]"
+      # The hand-pose timing chain, POSE_TIMEOUT <= clutch --stale-ms <
+      # SMOOTHER_RESET_GAP (docs/teleop.md, "Timing"). Checked.
+      POSE_TIMEOUT: "0.09"
+      SMOOTHER_RESET_GAP: "0.12"
+      POSE_GAP_MS: "100"
+      # Leaning in or turning the head does not move the arms.
+      PIVOT_MODE: "latched"
+      # The headset page's own log (connection trouble, dropped frames).
+      QUEST_LOG: "out/quest.log"
     inputs:
       # WebXR stops when all its inputs are closed on Quit.
       tick: _mod/tick
@@ -52,6 +80,8 @@ nodes:
       camera_head_right:
         source: _mod/camera_head_right
         queue_size: 1
+      hud: hud/hud
+      control: _mod/command
     outputs:
       - pose_right
       - trigger_right
@@ -69,35 +99,88 @@ nodes:
       - button_y
       - status
       - vr_receive_times
-      - pose_reference
 
-  - id: ik
-    path: ../dora-openarm-ik
-    args: >-
-      --mode bimanual --tick-hz 250
-      --max-iters 5 --damping 0.1
-      --posture-cost 0 --lm-damping 0.01 --limit-velocity
-      --frame-position-error-limit 0.001
-      --frame-orientation-error-limit 0.004
-      --nullspace-cost 5.0                                                         
-      --nullspace-return-rate 2.0  
-
+  # Moves an arm only while its grip is squeezed, by the hand's displacement
+  # since the squeeze, and holds it otherwise. Keeps the fingertips above the
+  # table (the MuJoCo scene's, or TABLE_Z on a real robot), inside reach and
+  # on their own side, and rides out input gaps up to 0.5 s without a re-grip.
+  - id: clutch
+    path: ../dora-openarm-clutch
+    args: --scene demo --tick-hz 250
+    env:
+      ROBOT: "${ROBOT:-dummy}"
+      TABLE_Z: "${TABLE_Z:-}"
     inputs:
-      target_right: webxr/pose_right
-      target_left: webxr/pose_left
-      trigger_right: webxr/trigger_right
-      trigger_left: webxr/trigger_left
+      tick: _mod/tick
+      pose_right: webxr/pose_right
+      pose_left: webxr/pose_left
+      grip_right: webxr/grip_right
+      grip_left: webxr/grip_left
+      # The first state, and the first after Start Arm, is where the arm holds.
+      state_right: _mod/state_right
+      state_left: _mod/state_left
+      control: _mod/command
+    outputs:
+      - target_right
+      - target_left
+      - clutch_state
+
+  # dora-openarm-ik with the gate's joint ranges and 0.9x its speeds, pinned to
+  # the fast cores. --tick-hz is the leader tick (dataflow.yaml, 4 ms).
+  - id: ik
+    path: ../dora-openarm-teleop-ik
+    args: --tick-hz 250
+    env:
+      ROBOT: "${ROBOT:-dummy}"
+    inputs:
+      # Queued: a late IK must not pair this tick's right with last tick's left.
+      target_right:
+        source: clutch/target_right
+        queue_size: 10
+      target_left:
+        source: clutch/target_left
+        queue_size: 10
     outputs:
       - position_right
       - position_left
       - status
 
-  # Renames the IK outputs to the common `follower_position_*`.
+  # Joint-space safety gate: bounded joint speed, jump and range checks, and
+  # it holds when the IK or the robot's state goes stale. Its output is what
+  # the robot executes and what the recorder stores as the action.
+  - id: gate
+    path: ../dora-openarm-gate
+    env:
+      ROBOT: "${ROBOT:-dummy}"
+    inputs:
+      tick: _mod/tick
+      position_right: ik/position_right
+      position_left: ik/position_left
+      state_right: _mod/state_right
+      state_left: _mod/state_left
+      control: _mod/command
+    outputs:
+      - cmd_right
+      - cmd_left
+      - gate_state
+
+  # What the headset shows: recording or not, each arm's clutch and gate state.
+  - id: hud
+    path: ../dora-openarm-teleop-hud
+    inputs:
+      tick: dora/timer/millis/100
+      command: _mod/command
+      clutch_state: clutch/clutch_state
+      gate_state: gate/gate_state
+    outputs:
+      - hud
+
+  # Renames the gate's outputs to the common `follower_position_*`.
   - id: out
     path: ../dora-echo
     inputs:
-      follower_position_right: ik/position_right
-      follower_position_left: ik/position_left
+      follower_position_right: gate/cmd_right
+      follower_position_left: gate/cmd_left
     outputs:
       - follower_position_right
       - follower_position_left

@@ -20,3 +20,8 @@
 /MUJOCO_LOG.TXT
 *.txt
 *.envsubst.yaml
+# TLS keys and the headset pairing token (scripts/webxr-setup).
+/tls/
+# Python bytecode.
+__pycache__/
+*.pyc
