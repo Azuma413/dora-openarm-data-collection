@@ -56,7 +56,10 @@ nodes:
       TLS_CERTIFICATE_FILE: "tls/server.crt"
       TLS_KEY_FILE: "tls/server.key"
       PAIRING_TOKEN_FILE: "tls/pairing_token"
-      VIEW_CONFIGURATION_FILE: "view-webxr.yaml"
+      # view-webxr-sim.yaml shows the simulated head camera (ROBOT=mujoco).
+      VIEW_CONFIGURATION_FILE: "${WEBXR_VIEW:-view-webxr.yaml}"
+      # Another port when 8443 is taken (e.g. by `tailscale serve`).
+      PORT: "${WEBXR_PORT:-8443}"
       # On a LAN the host candidates connect; a STUN server only adds a round
       # trip. A page on https://localhost (USB) relays through
       # scripts/webxr-usb instead (nodes/dora-openarm-webxr/PATCHES.md 18).
