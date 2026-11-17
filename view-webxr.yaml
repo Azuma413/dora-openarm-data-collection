@@ -23,7 +23,7 @@
 #   stereo : one image per eye; also needs camera_head_left and the camera /
 #            stereo calibration settings shown at the end of this file.
 #   none   : no camera panel or negotiated video tracks; pose input still works.
-view: mono
+view: none
 
 session:
   # immersive-ar requests a real-world/passthrough background when supported.

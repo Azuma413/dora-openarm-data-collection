@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ROBOT=cell: the real Cell. Followers on CAN, lifter, 4 cameras + stereo
-# splitter.
+# ROBOT=cell: the real Cell. Followers on CAN, lifter, 3 cameras and a ZED
+# Mini with depth on the head.
 #
 # The inputs and outputs below are common to all robot-*.yaml; see
 # docs/design.md. It also explains why `path:` starts with `../`.
@@ -52,6 +52,10 @@ module:
     - camera_head_left
     - camera_head_right
     - camera_ceiling
+    # Head depth aligned with camera_head_left, 16-bit PNG in mm.
+    - camera_head_depth
+    # Colorized camera_head_depth for the UI. Not recorded.
+    - camera_head_depth_preview
     - elevation_action
     - elevation_observation
 
@@ -136,33 +140,31 @@ nodes:
     outputs:
       - image
 
-  - id: head-stereo
-    path: ../opencv-video-capture
+  # ZED Mini on the head. One grab gives the rectified left and right images
+  # and the depth of the same exposure; see nodes/dora-openarm-zed.
+  - id: head-zed
+    path: ../dora-openarm-zed
     env:
-      # Please configure!
-      # Stereo camera: left and right images placed side by side in one frame.
-      CAPTURE_PATH: "/dev/camera_head_stereo"
-      ENCODING: "bgr8"
-      IMAGE_HEIGHT: 720
-      IMAGE_WIDTH: 2560
+      # Please configure! 0 opens the first ZED camera.
+      SERIAL_NUMBER: 0
+      RESOLUTION: "HD720"
+      FPS: 30
+      DEPTH_MODE: "NEURAL"
+      # The ZED Mini can't see closer than 100 mm.
+      DEPTH_MINIMUM: 100
+      DEPTH_MAXIMUM: 3000
+      JPEG_QUALITY: 90
+      # depth_preview for the UI at 10 fps.
+      PREVIEW_EVERY: 3
+      # Colors of depth_preview span DEPTH_MINIMUM to this, in mm.
+      PREVIEW_MAXIMUM: 1500
     inputs:
       tick: _mod/camera_tick
     outputs:
-      - image
-
-  - id: head-stereo-splitter
-    path: ../dora-opencv-image-splitter
-    env:
-      SPLIT_MODE: "vertical"
-      NUM_SPLITS: 2
-      JPEG_QUALITY: 90
-      IMAGE_HEIGHT: 720
-      IMAGE_WIDTH: 2560
-    inputs:
-      image: head-stereo/image
-    outputs:
-      - image_0
-      - image_1
+      - image_left
+      - image_right
+      - depth
+      - depth_preview
 
   - id: ceiling
     path: ../opencv-video-capture
@@ -185,12 +187,16 @@ nodes:
     inputs:
       camera_wrist_right: wrist-right/image
       camera_wrist_left: wrist-left/image
-      camera_head_left: head-stereo-splitter/image_0
-      camera_head_right: head-stereo-splitter/image_1
+      camera_head_left: head-zed/image_left
+      camera_head_right: head-zed/image_right
       camera_ceiling: ceiling/image
+      camera_head_depth: head-zed/depth
+      camera_head_depth_preview: head-zed/depth_preview
     outputs:
       - camera_wrist_right
       - camera_wrist_left
       - camera_head_left
       - camera_head_right
       - camera_ceiling
+      - camera_head_depth
+      - camera_head_depth_preview

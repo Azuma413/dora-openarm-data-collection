@@ -40,6 +40,8 @@ module:
     - camera_head_left
     - camera_head_right
     - camera_ceiling
+    - camera_head_depth
+    - camera_head_depth_preview
     - elevation_action
     - elevation_observation
 
@@ -101,3 +103,5 @@ nodes:
       - camera_head_left
       - camera_head_right
       - camera_ceiling
+      - camera_head_depth
+      - camera_head_depth_preview

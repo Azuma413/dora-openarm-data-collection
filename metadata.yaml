@@ -1,0 +1,94 @@
+# Copyright 2026 Enactic, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dataset metadata for every robot. The UI and the recorder read the common
+# part below and merge `robots.$ROBOT` over it (dicts merge key by key,
+# anything else is replaced).
+#
+# Changing anything here for a robot that already has a dataset under
+# data/$LEADER-$ROBOT/ makes the recorder refuse to start; move that
+# dataset away first.
+
+location: Lab
+operator: Tester
+
+# Pick one at launch with TASK=<index or prompt>; Skip in the UI moves on.
+tasks:
+  - prompt: Pick a spoon.
+    description: Pick a spoon on a table.
+
+  - prompt: Pick a cup.
+    description: Pick a cup on a table.
+
+equipment:
+  id: Test
+  version: "1.0"
+  embodiments:
+    arms:
+      id: OpenArm
+      version: "2.0"
+  perceptions:
+    cameras: {}
+
+robots:
+  cell:
+    equipment:
+      embodiments:
+        lifter:
+          id: OpenArmCellLifter
+          version: "1.0"
+          mechanism: lead_screw
+          lead_length: 5.0
+          stroke: 300
+          home: bottom
+          unit: mm
+      perceptions:
+        cameras:
+          wrist_left: {}
+          wrist_right: {}
+          ceiling: {}
+          head_left: {}
+          head_right: {}
+          # ZED Mini depth aligned with head_left, 16-bit PNG in mm (0: no depth).
+          head_depth: {}
+
+  # Arms only, no cameras.
+  pedestal: {}
+
+  # pedestal plus a MuJoCo viewer, which records nothing.
+  pedestal-viz: {}
+
+  pedestal-zed:
+    equipment:
+      perceptions:
+        cameras:
+          head_left: {}
+          head_right: {}
+          # ZED Mini depth aligned with head_left, 16-bit PNG in mm (0: no depth).
+          head_depth: {}
+
+  mujoco:
+    equipment:
+      perceptions:
+        cameras: &five_cameras
+          wrist_left: {}
+          wrist_right: {}
+          ceiling: {}
+          head_left: {}
+          head_right: {}
+
+  dummy:
+    equipment:
+      perceptions:
+        cameras: *five_cameras

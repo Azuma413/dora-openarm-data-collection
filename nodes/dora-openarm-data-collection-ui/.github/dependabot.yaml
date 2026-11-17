@@ -12,19 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-location: Lab
-operator: Tester
-
-tasks:
-  - prompt: Pick a spoon.
-    description: Pick a spoon on a table.
-
-equipment:
-  id: Test
-  version: "1.0"
-  embodiments:
-    arms:
-      id: OpenArm
-      version: "2.0"
-  perceptions:
-    cameras: {}
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci: "
+    open-pull-requests-limit: 10

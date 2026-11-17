@@ -1,52 +1,172 @@
-# Data collection configurations for OpenArm with dora-rs
+# OpenArm データ収集（dora-rs）
 
-This repository provides data collection configurations for [OpenArm](https://openarm.dev/) with [dora-rs](https://dora-rs.ai/).
+[OpenArm](https://openarm.dev/) を [dora-rs](https://dora-rs.ai/) で動かし、Meta Quest 3（WebXR）で遠隔操作してデータを収集する手順です。
 
-## Setup
+- [1. タスクとメタデータ](#1-タスクとメタデータ)
+- [2. 起動手順](#2-起動手順)
+- [3. 収集の操作](#3-収集の操作)
+- [4. 終了手順](#4-終了手順)
+- [5. 収録したデータを確認する](#5-収録したデータを確認する)
+- [6. トラブルシューティング](#6-トラブルシューティング)
+- [Configurations](#configurations)（英語）
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
-then run the following from the repository root after cloning:
+## 1. タスクとメタデータ
+
+タスク名、場所、オペレーターなどのメタデータは、すべて [`metadata.yaml`](metadata.yaml) の **1 ファイル**にまとめて書きます。
+
+```yaml
+location: Lab
+operator: Tester
+
+tasks:
+  - prompt: Pick a spoon.          # UI に表示されるタスク名
+    description: Pick a spoon on a table.
+  - prompt: Pick a cup.
+    description: Pick a cup on a table.
+```
+
+## 2. 起動手順
+
+### 2-1. CAN を立ち上げる
 
 ```bash
-git submodule update --init --recursive
-uv sync --locked
+for i in can0 can1; do
+  sudo ip link set $i down
+  sudo ip link set $i type can bitrate 1000000 dbitrate 5000000 fd on
+  sudo ip link set $i txqueuelen 1000
+  sudo ip link set $i up
+done
+ip -br link | grep can     # can0 と can1 が UP になっていれば OK
+```
+
+### 2-2. ターミナル 1：USB 中継を起動する
+
+Quest を USB-C でつないだ状態で、次を実行します。
+
+```bash
+cd ~/dora-openarm-data-collection
+scripts/webxr-usb/start.sh
+```
+
+### 2-3. ターミナル 2：dataflow を起動する
+
+```bash
+cd ~/dora-openarm-data-collection
 source .venv/bin/activate
+TASK="Pick a spoon." LEADER=webxr ROBOT=pedestal-zed scripts/dora-envsubst run dataflow.yaml --uv
 ```
 
-[`pyproject.toml`](pyproject.toml) selects Python 3.12, Dora CLI 1.0.1,
-and all node dependencies, including `openarm-driver>=0.5.1`.
-uv creates `.venv` in this repository and downloads a compatible Python if needed;
-no `.python-version` file is required. Nodes under `nodes/` are installed editable,
-so Python source edits take effect after restarting the node. The parent project
-manages the shared environment and is not installed as a Python package.
+- PC のブラウザで http://localhost:8000/ を開くと、データ収集 UI が表示されます。
 
-Run the dataflow from the same activated shell. [`dataflow.yaml`](dataflow.yaml)
-picks the leader and the robot by the `LEADER` and `ROBOT` environment variables.
-For example, to use WebXR with MuJoCo (no real arms required):
+### 2-4. Quest でテレオペを開始する
+
+1. Quest のブラウザで **`https://localhost:8443/`** を開きます。
+   - 証明書の警告が出たら、「詳細設定」→「localhost にアクセスする」で進みます。
+2. 数秒待ってから、**Start** を **1 回だけ**押します。
+3. **両手のトリガーを引きます。**
+   - 腕は最初、その場で止まっています。トリガーを引く（グリッパーを閉じる）と、腕がコントローラーの位置へ**ゆっくり**合わせに行きます。
+   - 合わせ終わると UI の Arm 表示が `ALIGNED` になり、そこから手の動きに追従します。左右の腕は別々に追従を始めます。
+
+## 3. 収集の操作
+
+### コントローラー
+
+| 操作 | 動作 |
+|---|---|
+| 手を動かす | 腕の手先が追従する |
+| **トリガー**（人差し指） | グリッパーを開閉する（引くと閉じる） |
+| **A ボタン**（右手） | 待機中：エピソードを**開始**<br>収録中：**成功**として保存 |
+| **B ボタン**（右手） | 待機中：**終了**（dataflow を止める）<br>収録中：**失敗**として保存 |
+
+コントローラーを見失った手、またはトリガーの入力がない手は、その場で一時停止します。
+
+### PC の UI（http://localhost:8000/）
+
+| ボタン | キー | 動作 |
+|---|---|---|
+| Start! | `c` | エピソードを開始する |
+| Success! | `c`（収録中） | 成功として保存する |
+| Fail! | `a`（収録中） | 失敗として保存する |
+| Cancel! | `a` 長押し（収録中） | 保存せずに破棄する |
+| Skip task | `c` 長押し | 次のタスクに切り替える |
+| Start Arm / Pause Arm | `b` 長押し | 腕の起動 / 停止 |
+| Quit | `b` | 終了する |
+
+### 1 エピソードの流れ
+
+1. 腕が `ALIGNED` になっていて、物体が初期位置に置かれていることを確認します。
+2. **A**（または UI の Start!）を押して、収録を開始します。
+3. タスクを実行します。
+4. 成功したら **A**、失敗したら **B** を押します。撮り直す場合は、UI の Cancel! で破棄します。
+5. 物体を初期位置に戻し、1 に戻ります。
+
+> 開始してすぐに A を押すと、0.2 秒ほどのごく短いエピソードが保存されます。押す前に、いま収録中かどうかを UI で確認してください。
+
+### 腕を初期姿勢に戻す
+
+UI で **Pause Arm** を押してから **Start Arm** を押します。
+
+- **Pause Arm**：終了姿勢（肘を 90°）へ 2 秒かけて移動したあと、**モーターの力が抜けます**。重力で腕が落ちることがあるので、**支えられる状態で押してください**。
+- **Start Arm**：モーターに力を入れ、開始姿勢へ移動します。そのあと、トリガーを引くと再びコントローラーの位置に合わせ直します。
+
+## 4. 終了手順
+
+1. 収録中でないことを確認してから、**B**（または UI の Quit）を押します。
+2. 腕が終了姿勢に移動して止まったら、ターミナル 2 で dataflow が終了したことを確認します。終了しない場合は Ctrl+C で止めます。
+3. ターミナル 1 の USB 中継を Ctrl+C で止めます。
+4. 腕を支えてから、ロボットの電源を切ります。
+
+## 5. 収録したデータを確認する
 
 ```bash
-./nodes/dora-openarm-webxr/example/prepare_tls.sh "$(hostname).local"
-LEADER=webxr ROBOT=mujoco scripts/dora-envsubst run dataflow.yaml --uv
+# エピソードの一覧（成功/失敗、長さ、カメラ）
+scripts/view-episode.py data/webxr-pedestal-zed/dataset
+
+# エピソード 2 を Rerun ビューアで再生（関節のグラフ、カメラ画像、深度）
+scripts/view-episode.py data/webxr-pedestal-zed/dataset 2
+
+# 画面のない環境では .rrd に書き出し、あとで `rerun ep2.rrd` で開く
+scripts/view-episode.py data/webxr-pedestal-zed/dataset 2 --save ep2.rrd
 ```
 
-See [Configurations](#configurations) for the other leaders and robots, and the
-WebXR section below for browser URLs and TLS details.
-The dataflow has no package-installing `build` commands; `uv sync --locked`
-installs its dependencies, so a separate `dora build` step is not needed.
+データの構成は次のとおりです。
 
-[`uv.lock`](uv.lock) locks the resolved dependency versions. Editable node source
-revisions are pinned by this repository's Git submodule commits; the lockfile
-does not freeze uncommitted source changes. In each new terminal, run
-`source .venv/bin/activate` before invoking `dora` so that it uses this project's
-CLI rather than another program with the same name.
+```
+data/<LEADER>-<ROBOT>/dataset/
+├── metadata.yaml                                # エピソード一覧（成功/失敗、task_index）
+└── episodes/<番号>/
+    ├── obs/arms/{left,right}/state.parquet      # 実際の関節（qpos, qvel, qtorque）
+    ├── action/arms/{left,right}/state.parquet   # 指令値
+    └── cameras/<カメラ名>/<時刻ns>.jpeg | .png  # 深度は 16bit PNG（mm、0 は深度なし）
+```
 
-Use `uv sync --locked` after pulling updates. It refuses to change an outdated
-lockfile and removes packages outside the managed dependency set. To intentionally
-update a dependency, run `uv lock --upgrade-package <package>`, then
-`uv sync --locked`, test, and commit the lockfile. After changing dependency
-declarations or node submodule revisions, run `uv lock` and commit any resulting
-lockfile changes along with the TOML or submodule changes.
-See [uv's synchronization rules](https://docs.astral.sh/uv/concepts/projects/sync/).
+- UI に表示されるエピソード番号は、起動するたびに 0 から始まります。既存の番号とぶつかった場合は、空いている次の番号で保存されます。実際に保存された番号は、上の一覧で確認してください。
+- 不要なエピソード（極端に短いものなど）は、収集を終えたあとで整理してください。
+
+## 6. トラブルシューティング
+
+| 症状 | 原因と対処 |
+|---|---|
+| `uv: command not found` | [uv](https://docs.astral.sh/uv/getting-started/installation/) をインストールします。 |
+| Quest でページが開かない | `adb devices` が `device` になっているか確認します。`unauthorized` なら、ゴーグル内で USB デバッグを許可します。そのあと `scripts/webxr-usb/start.sh` を起動し直します。 |
+| Start を押しても反応しない | 前回の XR セッションが残っています（コンソールに `already an active, immersive XRSession` と出ます）。Quest の**ブラウザアプリを完全に終了**して開き直します。それでも直らなければ、Quest を再起動します。 |
+| Start は押せるのに腕が動かない | ターミナル 1 の USB 中継（TURN）が止まっていないか確認します。Wi-Fi では端末どうしの通信が遮断されていることがあるので、USB 接続を使ってください。 |
+| 片方の腕が `ALIGNED` にならない | ロボット側のログに `arm[N] went silent` と出ていれば、N 番（0 から数える）のモーターが応答していません。たとえば `arm[5]` は J6（手首の曲げ）です。その付近のケーブルと電源を確認します。 |
+| ログに `write_no_buffer` が大量に出る | CAN の送信キューが小さすぎます。`txqueuelen 1000` を設定します（[2-1](#2-1-can-を立ち上げる) を参照）。 |
+| 追従が極端に遅い | [`modules/leader-webxr.yaml`](modules/leader-webxr.yaml) の IK オプション `--frame-position-error-limit` などが、小さすぎる値になっていないか確認します。 |
+| UI のボタンを押しても反応が遅い | UI のページを再読み込みします（改善済みですが、古いページを開いたままの場合に起こります）。 |
+| エピソードが保存されていない | レコーダーのログ（`out/<実行ID>/log_recorder.jsonl`）を確認します。`metadata does not match` と出ていれば、[1 章](#1-タスクとメタデータ)の注意を参照してください。 |
+| 深度の表示が真っ黒 / ちらつく | `scripts/view-episode.py` を使えば、色の範囲を固定したカラーマップで表示されます。 |
+
+### ログの場所
+
+dataflow のログは、実行ごとに `out/<実行ID>/log_<ノード名>.jsonl` に保存されます。
+
+```bash
+d=$(ls -td out/*/ | head -1)       # 最新の実行
+tail -5 $d/log_robot.right.jsonl   # 右腕
+tail -5 $d/log_recorder.jsonl      # レコーダー
+```
 
 ## Configurations
 
@@ -56,7 +176,7 @@ are modules under [`modules/`](modules) picked by environment variables:
 | Variable | Values | Picks | Default |
 |---|---|---|---|
 | `LEADER` | `ker`, `vr`, `webxr`, `dummy` | `modules/leader-$LEADER.yaml` | `dummy` |
-| `ROBOT` | `cell` (real Cell), `pedestal`, `mujoco`, `dummy` | `modules/robot-$ROBOT.yaml` | `dummy` |
+| `ROBOT` | `cell` (real Cell), `pedestal`, `pedestal-zed`, `mujoco`, `dummy` | `modules/robot-$ROBOT.yaml` | `dummy` |
 
 dora doesn't expand environment variables in `module:` paths
 ([dora-rs/dora#3805](https://github.com/dora-rs/dora/issues/3805)), so run the
@@ -64,20 +184,42 @@ dataflow through [`scripts/dora-envsubst`](scripts/dora-envsubst). It expands
 `$VAR`, `${VAR}` and `${VAR:-default}` in `module:` paths, writes the result to
 `<name>.envsubst.yaml` and runs the given dora command on it.
 
+`ROBOT=cell` and `ROBOT=pedestal-zed` capture the head ZED Mini with the ZED
+SDK, which computes depth on the GPU. Install the ZED SDK first; see
+[`nodes/dora-openarm-zed`](nodes/dora-openarm-zed/README.md). The depth is
+recorded as `cameras/head_depth/<timestamp>.png` (16-bit, mm) and shown in
+the UI.
+
 Only the selected leader and robot are in the dataflow, so the others open no
 device or port. `LEADER=dummy` with `ROBOT=cell` or `ROBOT=pedestal` moves the
 real arms with generated motion. See [`docs/design.md`](docs/design.md) for how
 the modules are structured.
 
-The UI and the recorder use `metadata_$ROBOT.yaml`, and datasets are recorded
-under `data/$LEADER-$ROBOT/`, e.g. `data/webxr-mujoco/`:
+`TASK` picks the task to start with from the `tasks` in [`metadata.yaml`](metadata.yaml),
+by index or by its prompt (exact, or a unique part of it, case-insensitive).
+It defaults to the first task, and Skip in the UI still moves to the next one.
+An unknown or ambiguous `TASK` stops the UI with the list of tasks:
 
-| Robot | Metadata | Recorded equipment |
-|---|---|---|
-| `cell` | [`metadata_cell.yaml`](metadata_cell.yaml) | Arms, lifter, five cameras |
-| `pedestal` | [`metadata_pedestal.yaml`](metadata_pedestal.yaml) | Arms only |
-| `mujoco` | [`metadata_mujoco.yaml`](metadata_mujoco.yaml) | Arms, five simulated cameras |
-| `dummy` | [`metadata_dummy.yaml`](metadata_dummy.yaml) | Arms, five dummy cameras |
+```bash
+TASK="Pick a cup." LEADER=webxr ROBOT=mujoco scripts/dora-envsubst run dataflow.yaml --uv
+```
+
+All dataset metadata is in one file, [`metadata.yaml`](metadata.yaml): the
+location, the operator, the tasks and the equipment common to every robot,
+plus a `robots:` section with what each robot adds, picked by `ROBOT`.
+Datasets are recorded under `data/$LEADER-$ROBOT/`, e.g. `data/webxr-mujoco/`:
+
+| Robot | Recorded equipment |
+|---|---|
+| `cell` | Arms, lifter, five cameras, head depth |
+| `pedestal`, `pedestal-viz` | Arms only |
+| `pedestal-zed` | Arms, head ZED Mini with depth |
+| `mujoco` | Arms, five simulated cameras |
+| `dummy` | Arms, five dummy cameras |
+
+The recorder refuses to append to a dataset recorded with different
+metadata, e.g. after editing the tasks, so move `data/$LEADER-$ROBOT/` away
+first.
 
 ### KER leader
 

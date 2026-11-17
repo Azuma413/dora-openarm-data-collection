@@ -32,9 +32,13 @@ dependencies = [
     "dora-openarm-quitter",
     "dora-openarm-vr",
     "dora-openarm-webxr",
+    "dora-openarm-zed",
     "dora-opencv-image-splitter",
     "opencv-video-capture",
     "openarm-driver>=0.5.1",
+    # For dora-openarm-zed. Must match the installed ZED SDK's major.minor;
+    # see nodes/dora-openarm-zed/README.md.
+    "pyzed==5.3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.uv]
@@ -58,4 +62,8 @@ dora-openarm-mujoco = { path = "nodes/dora-openarm-mujoco", editable = true }
 dora-openarm-quitter = { path = "nodes/dora-openarm-quitter", editable = true }
 dora-openarm-vr = { path = "nodes/dora-openarm-vr", editable = true }
 dora-openarm-webxr = { path = "nodes/dora-openarm-webxr", editable = true }
+dora-openarm-zed = { path = "nodes/dora-openarm-zed", editable = true }
 dora-opencv-image-splitter = { path = "nodes/dora-opencv-image-splitter", editable = true }
+# The ZED Python API is not on PyPI. Stereolabs hosts one wheel per ZED SDK
+# major.minor; the wheel only needs the SDK's libraries at import time.
+pyzed = { url = "https://download.stereolabs.com/zedsdk/5.3/whl/linux_x86_64/pyzed-5.3-cp312-cp312-linux_x86_64.whl" }
