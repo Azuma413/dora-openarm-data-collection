@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ROBOT=pedestal-zed: robot-pedestal plus a ZED Mini on the head. Followers
-# on CAN, no lifter; the ZED gives the head images and depth.
+# ROBOT=pedestal-zed: robot-pedestal plus a ZED Mini on the head and USB
+# cameras on the wrists. Followers on CAN, no lifter; the ZED gives the head
+# images and depth.
 # See robot-cell.yaml for the common inputs and outputs.
 module:
   name: robot-pedestal-zed
@@ -117,9 +118,40 @@ nodes:
       - depth
       - depth_preview
 
-  # Renames the ZED's outputs to the common names. Stops on Quit with the
-  # ZED because `camera_tick` is closed, which also closes the outputs that
-  # are never sent.
+  # USB cameras on the wrists, the same as robot-cell.yaml's.
+  - id: wrist-right
+    path: ../opencv-video-capture
+    env:
+      # Please configure! A stable name for the device, such as a udev
+      # symlink or /dev/v4l/by-id/...-video-index0; /dev/videoN can swap
+      # between the two wrists across reboots.
+      CAPTURE_PATH: "/dev/camera_wrist_right"
+      ENCODING: "jpeg"
+      IMAGE_HEIGHT: 600
+      IMAGE_WIDTH: 960
+      JPEG_QUALITY: 90
+    inputs:
+      tick: _mod/camera_tick
+    outputs:
+      - image
+
+  - id: wrist-left
+    path: ../opencv-video-capture
+    env:
+      # Please configure! See wrist-right.
+      CAPTURE_PATH: "/dev/camera_wrist_left"
+      ENCODING: "jpeg"
+      IMAGE_HEIGHT: 600
+      IMAGE_WIDTH: 960
+      JPEG_QUALITY: 90
+    inputs:
+      tick: _mod/camera_tick
+    outputs:
+      - image
+
+  # Renames the cameras' outputs to the common names. Stops on Quit with the
+  # cameras because `camera_tick` is closed, which also closes the outputs
+  # that are never sent.
   - id: cameras
     path: ../dora-echo
     inputs:
@@ -127,12 +159,14 @@ nodes:
       camera_head_right: head-zed/image_right
       camera_head_depth: head-zed/depth
       camera_head_depth_preview: head-zed/depth_preview
+      camera_wrist_right: wrist-right/image
+      camera_wrist_left: wrist-left/image
     outputs:
       - camera_head_left
       - camera_head_right
       - camera_head_depth
       - camera_head_depth_preview
-      # Not sent by the pedestal.
       - camera_wrist_right
       - camera_wrist_left
+      # Not sent by the pedestal.
       - camera_ceiling

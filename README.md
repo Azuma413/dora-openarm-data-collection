@@ -215,7 +215,7 @@ Datasets are recorded under `data/$LEADER-$ROBOT/`, e.g. `data/webxr-mujoco/`:
 |---|---|
 | `cell` | Arms, lifter, five cameras, head depth |
 | `pedestal`, `pedestal-viz` | Arms only |
-| `pedestal-zed` | Arms, head ZED Mini with depth |
+| `pedestal-zed` | Arms, wrist cameras, head ZED Mini with depth |
 | `mujoco` | Arms, five simulated cameras |
 | `dummy` | Arms, five dummy cameras |
 
