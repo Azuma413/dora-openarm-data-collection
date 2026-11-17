@@ -23,7 +23,7 @@ jobs:
   run:
     name: Run
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,6 +42,19 @@ jobs:
       - name: Install
         run: |
           uv sync --locked
+      - name: Unit tests
+        run: |
+          uv run --no-sync pytest -q nodes/dora-openarm-teleop/tests nodes/dora-openarm-data-collection-ui/tests
+      - name: Teleop end to end
+        env:
+          MUJOCO_GL: egl
+        run: |
+          sudo apt-get install -y libegl1
+          uv run --no-sync pytest -q -m e2e nodes/dora-openarm-teleop/tests
+      - name: Check the WebXR dataflow
+        run: |
+          LEADER=webxr ROBOT=mujoco uv run --no-sync scripts/check-dataflow dataflow.yaml
+          LEADER=webxr ROBOT=pedestal uv run --no-sync scripts/check-dataflow dataflow.yaml
       - name: Up
         id: up
         run: |

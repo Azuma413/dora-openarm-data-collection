@@ -1,0 +1,26 @@
+dora-openarm-data-collection
+Copyright 2026 Enactic, Inc.
+
+This fork (https://github.com/Raptor-zip/dora-openarm-data-collection) adds:
+
+- Changes from https://github.com/guchio123/dora-openarm-data-collection
+  (Apache-2.0).
+- nodes/dora-openarm-teleop and the patches 1-17 in
+  nodes/dora-openarm-webxr/PATCHES.md, ported from openarm-quest-teleop
+  by Kaibuchi Soma.
+- nodes/dora-openarm-teleop/src/dora_openarm_teleop/joint_limits.yaml and
+  model_info.py contain values derived from enactic/openarm_driver and
+  enactic/openarm_mujoco (Apache-2.0).
+
+three.js
+  Copyright 2010-2025 three.js authors
+  Licensed under the MIT License
+  Source: https://github.com/mrdoob/three.js (npm three@0.179.1, REVISION 179, integrity
+  sha512-5y/elSIQbrvKOISxpwXCR4sQqHtGiOI+MKLc3SsBdDXA2hz3Mdp3X59aUp8DyybMa34aeBwbFTpdoLJaUDEWSw==)
+  Location: nodes/dora-openarm-webxr/src/dora_openarm_webxr/static/three/
+  (license text: that directory's LICENSE)
+  Changes: build/three.module.min.js and build/three.core.min.js are byte-identical;
+  examples/jsm/loaders/GLTFLoader.js and examples/jsm/utils/BufferGeometryUtils.js have
+  their import specifiers rewritten to relative paths. Provenance and per-file SHA-256 in
+  that directory's README.md. Vendored by nodes/dora-openarm-webxr/PATCHES.md 15 (the 3D
+  headset view).

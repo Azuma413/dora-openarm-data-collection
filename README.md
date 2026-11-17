@@ -2,6 +2,19 @@
 
 [OpenArm](https://openarm.dev/) を [dora-rs](https://dora-rs.ai/) で動かし、Meta Quest 3（WebXR）で遠隔操作してデータを収集する手順です。
 
+[enactic/dora-openarm-data-collection](https://github.com/enactic/dora-openarm-data-collection) のフォークです。
+[guchio123 のフォーク](https://github.com/guchio123/dora-openarm-data-collection)の運用（この README の手順、
+タスクのメタデータ、UI、pedestal/ZED、USB 接続）を引き継ぎ、WebXR テレオペを作り直しています。
+
+- **ラグの原因だった IK の 1 ステップあたりの誤差制限を外しました。** 0.2 m/s・90°/s の手の動きで、
+  手首の追従誤差は 23° → 0.8°、止めてから追いつくまで 525 ms → 6 ms（MuJoCo での実測、[docs/teleop.md](docs/teleop.md#measured)）。
+- **グリップを握っている間だけ腕が手の動きに追従します（クラッチ）。** 離せば腕はその場で止まるので、手を楽な位置に戻して握り直せます。
+- **速度・関節範囲・追従を監視する安全ゲート**が、IK とロボットの間に入っています。
+- ゴーグル内に状態表示（HUD）が出ます。B は長押しでのみ終了します。接続にはペアリングトークンが必要です。
+
+仕組みと数値の根拠は [docs/teleop.md](docs/teleop.md)（英語）にあります。
+
+- [0. インストール](#0-インストール)
 - [1. タスクとメタデータ](#1-タスクとメタデータ)
 - [2. 起動手順](#2-起動手順)
 - [3. 収集の操作](#3-収集の操作)
@@ -9,6 +22,20 @@
 - [5. 収録したデータを確認する](#5-収録したデータを確認する)
 - [6. トラブルシューティング](#6-トラブルシューティング)
 - [Configurations](#configurations)（英語）
+
+## 0. インストール
+
+```bash
+sudo apt install libcli11-dev coturn   # coturn は USB 接続のときだけ必要
+git clone --recursive https://github.com/Raptor-zip/dora-openarm-data-collection.git
+cd dora-openarm-data-collection
+uv sync
+uv run scripts/webxr-setup             # 証明書とペアリングトークン（tls/）。最初の 1 回だけ
+```
+
+`scripts/webxr-setup` が表示する `https://…:8443/#k=…` が Quest で開く URL です。`#k=` 以降がトークンで、
+これを知っている端末だけがロボットを動かせます。**他人に見せないでください。** 漏れたら
+`uv run scripts/webxr-setup --rotate-token` で作り直します（保存済みの URL はすべて無効になります）。
 
 ## 1. タスクとメタデータ
 
@@ -58,14 +85,22 @@ TASK="Pick a spoon." LEADER=webxr ROBOT=pedestal-zed scripts/dora-envsubst run d
 
 - PC のブラウザで http://localhost:8000/ を開くと、データ収集 UI が表示されます。
 
+起動前に、テレオペのノードどうしの設定（タイミング、周期、速度上限）の食い違いが自動で検査されます。
+食い違いがあると起動せず、どこが違うかを表示します（[docs/teleop.md](docs/teleop.md#checks)）。
+
+実機で机の高さを使う場合は、測った値を `TABLE_Z=-0.30`（m、`arm_origin` 基準）のように付けて起動します。
+付けないと、実機では机への押し付け防止（指先を机より上に保つ制限）が**無効**になります（起動時に表示されます）。
+
 ### 2-4. Quest でテレオペを開始する
 
-1. Quest のブラウザで **`https://localhost:8443/`** を開きます。
+1. Quest のブラウザで、`scripts/webxr-setup` が表示した **`https://localhost:8443/#k=…`** を開きます。
    - 証明書の警告が出たら、「詳細設定」→「localhost にアクセスする」で進みます。
 2. 数秒待ってから、**Start** を **1 回だけ**押します。
-3. **両手のトリガーを引きます。**
-   - 腕は最初、その場で止まっています。トリガーを引く（グリッパーを閉じる）と、腕がコントローラーの位置へ**ゆっくり**合わせに行きます。
-   - 合わせ終わると UI の Arm 表示が `ALIGNED` になり、そこから手の動きに追従します。左右の腕は別々に追従を始めます。
+3. **両手のトリガーを 1 回ずつ引きます。** フォロワーが指令を受け付け始め、UI の Arm 表示が `ALIGNED` になります
+   （Start Arm のたびに 1 回必要です）。腕は今いる位置で止まったままです。
+4. **グリップ（中指）を握ると**、その腕が手の動きに追従します。離すとその場で止まります。
+   - 握る前に、手を 0.3 秒ほど止めてください。動かしながら握っても追従は始まりません。
+   - ゴーグル内の表示が `R:FOLLOW` になっていれば右腕が追従中です。
 
 ## 3. 収集の操作
 
@@ -73,12 +108,27 @@ TASK="Pick a spoon." LEADER=webxr ROBOT=pedestal-zed scripts/dora-envsubst run d
 
 | 操作 | 動作 |
 |---|---|
-| 手を動かす | 腕の手先が追従する |
+| **グリップ**（中指）を握ったまま手を動かす | その腕の手先が、握った時点からの手の動きの分だけ動く |
+| グリップを離す | その腕はその場で止まる。手を楽な位置に戻して、握り直せばまた動く |
 | **トリガー**（人差し指） | グリッパーを開閉する（引くと閉じる） |
 | **A ボタン**（右手） | 待機中：エピソードを**開始**<br>収録中：**成功**として保存 |
-| **B ボタン**（右手） | 待機中：**終了**（dataflow を止める）<br>収録中：**失敗**として保存 |
+| **B ボタン**（右手） | 収録中：**失敗**として保存<br>待機中：**2 秒長押し**で終了（dataflow を止める） |
 
-コントローラーを見失った手、またはトリガーの入力がない手は、その場で一時停止します。
+頭を動かしたり体を傾けたりしても、腕は動きません。
+コントローラーを見失った手は、その場で一時停止します。0.5 秒以内に同じ位置へ戻れば、握り直さずに再開します。
+
+### ゴーグル内の表示（HUD）
+
+| 表示 | 意味 |
+|---|---|
+| `READY` / `REC 01:05  ep 7` | 待機中 / 収録中（経過時間、エピソード番号） |
+| `R:FOLLOW` | 右腕が手に追従している |
+| `R:HOLD` | グリップを離していて、腕は止まっている |
+| `R:REGRIP` | いったんグリップを離してから握り直す必要がある（起動直後、Start Arm の後など） |
+| `R:LATE` | コントローラーの入力が途切れている |
+| `GATE R:HOLDING(理由)` | 安全ゲートが右腕を止めている。理由は [docs/teleop.md](docs/teleop.md#gate-dora-openarm-gate) |
+
+開始・成功・失敗で右手、取り消しで左手、終了で両手のコントローラーが振動します。
 
 ### PC の UI（http://localhost:8000/）
 
@@ -94,7 +144,7 @@ TASK="Pick a spoon." LEADER=webxr ROBOT=pedestal-zed scripts/dora-envsubst run d
 
 ### 1 エピソードの流れ
 
-1. 腕が `ALIGNED` になっていて、物体が初期位置に置かれていることを確認します。
+1. 腕が `ALIGNED` で、ゴーグル内に `GATE` の行が出ておらず、物体が初期位置に置かれていることを確認します。
 2. **A**（または UI の Start!）を押して、収録を開始します。
 3. タスクを実行します。
 4. 成功したら **A**、失敗したら **B** を押します。撮り直す場合は、UI の Cancel! で破棄します。
@@ -107,11 +157,11 @@ TASK="Pick a spoon." LEADER=webxr ROBOT=pedestal-zed scripts/dora-envsubst run d
 UI で **Pause Arm** を押してから **Start Arm** を押します。
 
 - **Pause Arm**：終了姿勢（肘を 90°）へ 2 秒かけて移動したあと、**モーターの力が抜けます**。重力で腕が落ちることがあるので、**支えられる状態で押してください**。
-- **Start Arm**：モーターに力を入れ、開始姿勢へ移動します。そのあと、トリガーを引くと再びコントローラーの位置に合わせ直します。
+- **Start Arm**：モーターに力を入れ、開始姿勢へ移動します。そのあと両手のトリガーを 1 回ずつ引き、グリップを握り直すと、開始姿勢から操作を再開できます。
 
 ## 4. 終了手順
 
-1. 収録中でないことを確認してから、**B**（または UI の Quit）を押します。
+1. 収録中でないことを確認してから、**B を 2 秒長押し**します（または UI の Quit）。
 2. 腕が終了姿勢に移動して止まったら、ターミナル 2 で dataflow が終了したことを確認します。終了しない場合は Ctrl+C で止めます。
 3. ターミナル 1 の USB 中継を Ctrl+C で止めます。
 4. 腕を支えてから、ロボットの電源を切ります。
@@ -148,12 +198,14 @@ data/<LEADER>-<ROBOT>/dataset/
 | 症状 | 原因と対処 |
 |---|---|
 | `uv: command not found` | [uv](https://docs.astral.sh/uv/getting-started/installation/) をインストールします。 |
-| Quest でページが開かない | `adb devices` が `device` になっているか確認します。`unauthorized` なら、ゴーグル内で USB デバッグを許可します。そのあと `scripts/webxr-usb/start.sh` を起動し直します。 |
+| Quest でページが開かない / `wrong or missing pairing token` と出て接続できない | URL に `#k=…` が付いているか確認します（`scripts/webxr-setup` が表示したもの）。トークンを作り直した場合は新しい URL を開きます。USB の場合は、`adb devices` が `device` になっているか確認します。`unauthorized` なら、ゴーグル内で USB デバッグを許可します。そのあと `scripts/webxr-usb/start.sh` を起動し直します。 |
 | Start を押しても反応しない | 前回の XR セッションが残っています（コンソールに `already an active, immersive XRSession` と出ます）。Quest の**ブラウザアプリを完全に終了**して開き直します。それでも直らなければ、Quest を再起動します。 |
 | Start は押せるのに腕が動かない | ターミナル 1 の USB 中継（TURN）が止まっていないか確認します。Wi-Fi では端末どうしの通信が遮断されていることがあるので、USB 接続を使ってください。 |
 | 片方の腕が `ALIGNED` にならない | ロボット側のログに `arm[N] went silent` と出ていれば、N 番（0 から数える）のモーターが応答していません。たとえば `arm[5]` は J6（手首の曲げ）です。その付近のケーブルと電源を確認します。 |
 | ログに `write_no_buffer` が大量に出る | CAN の送信キューが小さすぎます。`txqueuelen 1000` を設定します（[2-1](#2-1-can-を立ち上げる) を参照）。 |
-| 追従が極端に遅い | [`modules/leader-webxr.yaml`](modules/leader-webxr.yaml) の IK オプション `--frame-position-error-limit` などが、小さすぎる値になっていないか確認します。 |
+| グリップを握っても腕が動かない | ゴーグル内の表示を見ます。`REGRIP` ならいったん離して握り直します。`--` や `LATE` ならコントローラーが追跡されていません。`GATE … HOLDING` なら理由を [docs/teleop.md](docs/teleop.md#gate-dora-openarm-gate) で確認します。手を止めずに握ると追従は始まりません。 |
+| 起動時に `dora-envsubst: leader: …` と出て起動しない | テレオペのノードどうしの設定が食い違っています。メッセージの項目を [`modules/leader-webxr.yaml`](modules/leader-webxr.yaml) で直します（[docs/teleop.md](docs/teleop.md#checks)）。 |
+| 追従が遅い | IK に `--frame-position-error-limit` などの誤差制限を付けていないか確認します（付けると遅くなります。[docs/teleop.md](docs/teleop.md#measured)）。実機では安全ゲートが関節速度をドライバ上限の 0.5 倍に抑えています。 |
 | UI のボタンを押しても反応が遅い | UI のページを再読み込みします（改善済みですが、古いページを開いたままの場合に起こります）。 |
 | エピソードが保存されていない | レコーダーのログ（`out/<実行ID>/log_recorder.jsonl`）を確認します。`metadata does not match` と出ていれば、[1 章](#1-タスクとメタデータ)の注意を参照してください。 |
 | 深度の表示が真っ黒 / ちらつく | `scripts/view-episode.py` を使えば、色の範囲を固定したカラーマップで表示されます。 |
@@ -166,7 +218,10 @@ dataflow のログは、実行ごとに `out/<実行ID>/log_<ノード名>.jsonl
 d=$(ls -td out/*/ | head -1)       # 最新の実行
 tail -5 $d/log_robot.right.jsonl   # 右腕
 tail -5 $d/log_recorder.jsonl      # レコーダー
+tail -5 $d/log_leader.gate.jsonl   # 安全ゲート（止めた理由）
 ```
+
+Quest のブラウザ側のエラーは `out/quest.log` に保存されます。
 
 ## Configurations
 
@@ -194,6 +249,11 @@ Only the selected leader and robot are in the dataflow, so the others open no
 device or port. `LEADER=dummy` with `ROBOT=cell` or `ROBOT=pedestal` moves the
 real arms with generated motion. See [`docs/design.md`](docs/design.md) for how
 the modules are structured.
+
+With `LEADER=webxr`, `TABLE_Z` (m, in the `arm_origin` frame) is the
+measured table for the clutch on a real robot; see [`docs/teleop.md`](docs/teleop.md).
+`scripts/dora-envsubst` checks the teleop nodes' couplings before `run`,
+`start` and `build` (`SKIP_TELEOP_CHECK=1` skips it).
 
 `TASK` picks the task to start with from the `tasks` in [`metadata.yaml`](metadata.yaml),
 by index or by its prompt (exact, or a unique part of it, case-insensitive).
