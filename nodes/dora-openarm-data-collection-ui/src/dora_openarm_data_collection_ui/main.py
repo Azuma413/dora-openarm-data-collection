@@ -17,22 +17,23 @@
 import argparse
 import asyncio
 import collections
-from contextlib import asynccontextmanager
 import dataclasses
 import datetime
-import dora
 import json
+import os
+import pathlib
+import time
 from collections.abc import AsyncIterable
+from contextlib import asynccontextmanager
+
+import dora
+import pyarrow as pa
+import uvicorn
+import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.templating import Jinja2Templates
-import os
-import pathlib
-import pyarrow as pa
-import time
-import uvicorn
-import yaml
 
 base_dir = os.path.dirname(__file__)
 templates = Jinja2Templates(directory=f"{base_dir}/templates")
@@ -196,6 +197,54 @@ BUS_COUNTER_SEVERITY = (
     ("ack_error", "NO ACK"),
     ("bus_off", "BUS-OFF"),
 )
+
+
+# Holding B this long while not recording quits the whole collection. A single
+# press used to: B is also "fail" during an episode, so one press too many right
+# after an episode ended stopped the dataflow.
+QUIT_HOLD_S = 2.0
+
+
+@dataclasses.dataclass
+class HeadsetButtons:
+    """Turn the headset's A/B button levels into UI actions.
+
+    The leader sends each button's level with every frame. A and B act on a
+    rising edge, except B outside an episode, which quits only once it has been
+    held for QUIT_HOLD_S. A press that started an action does nothing else until
+    released, so a B that ends an episode (fail) cannot run on into a quit.
+    """
+
+    quit_hold_s: float = QUIT_HOLD_S
+    _down: dict = dataclasses.field(default_factory=dict)
+    _used: set = dataclasses.field(default_factory=set)
+
+    def on_button(self, button, pressed, collecting, now):
+        """Return "start" / "success" / "fail" / "quit", or None."""
+        was_down = button in self._down
+        if not pressed:
+            self._down.pop(button, None)
+            self._used.discard(button)
+            return None
+        if not was_down:
+            self._down[button] = now
+        if button in self._used:
+            return None
+        if button == "button_a":
+            if was_down:
+                return None
+            self._used.add(button)
+            return "success" if collecting else "start"
+        if button == "button_b":
+            if collecting:
+                if was_down:
+                    return None
+                self._used.add(button)
+                return "fail"
+            if now - self._down[button] >= self.quit_hold_s:
+                self._used.add(button)
+                return "quit"
+        return None
 
 
 def _event_ts_to_seconds(ts) -> float:
@@ -639,7 +688,7 @@ async def _main_dora(server):
     """Quit the Web application when this dataflow is stopped."""
     # Bring the arm(s) up on boot. dora-openarm no longer auto-starts
     _command_arm_start()
-    last_values = {}
+    buttons = HeadsetButtons()
     while state.running:
         if node.is_empty():
             await asyncio.sleep(0.001)
@@ -688,22 +737,20 @@ async def _main_dora(server):
             if event_id not in ("button_a", "button_b"):
                 continue
 
-            value = event["value"][0].as_py()
-            triggered = value and not last_values.get(event_id, False)
-            last_values[event_id] = value
-            if not triggered:
+            action = buttons.on_button(
+                event_id,
+                bool(event["value"][0].as_py()),
+                state.collecting,
+                time.monotonic(),
+            )
+            if action is None:
                 continue
-
-            if state.collecting:
-                if event_id == "button_a":
-                    _command_success()
-                elif event_id == "button_b":
-                    _command_fail()
-            else:
-                if event_id == "button_a":
-                    _command_start()
-                elif event_id == "button_b":
-                    _command_quit()
+            {
+                "start": _command_start,
+                "success": _command_success,
+                "fail": _command_fail,
+                "quit": _command_quit,
+            }[action]()
 
             await _notify_state_changed()
     server.should_exit = True
