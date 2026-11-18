@@ -121,6 +121,37 @@ def _qpos(value: pa.Array) -> np.ndarray:
         return np.empty(0, dtype=np.float32)
 
 
+# Motor statuses that still mean the qpos is a fresh reading (openarm_can's names).
+# Anything else -- SILENT (no reply: the driver repeats the last value it got),
+# COMMUNICATION_LOST, OVERCURRENT and the other faults, UNKNOWN -- does not.
+_LIVE_MOTOR_STATUSES = frozenset({"ENABLED", "DISABLED"})
+
+
+def state_faults(value: pa.Array) -> list[str]:
+    """Why a STATE8 cannot be trusted as feedback (empty when it can).
+
+    dora-openarm keeps publishing state when the motors stop answering or the CAN
+    link goes down: the qpos is the last reply, stamped as new. Taking it would keep
+    the gate engaged on an arm it cannot see. A flat QPOS8, or a struct without
+    motor_status / bus, has nothing to say and is trusted as before.
+    """
+    try:
+        if not pa.types.is_struct(value.type) or len(value) == 0:
+            return []
+        row = value[0].as_py() or {}
+    except Exception:  # noqa: BLE001 - malformed input is the qpos check's job
+        return []
+    faults = [
+        f"J{index + 1}={status}"
+        for index, status in enumerate(row.get("motor_status") or [])
+        if status not in _LIVE_MOTOR_STATUSES
+    ]
+    bus = row.get("bus")
+    if isinstance(bus, Mapping) and bus.get("carrier") is False:
+        faults.append("bus=no_carrier")
+    return faults
+
+
 class GateNode:
     """Maps dora events onto a Gate."""
 
@@ -135,6 +166,8 @@ class GateNode:
         self.send = send
         self.clock = clock
         self.log = log or (lambda line: print(line, file=sys.stderr, flush=True))
+        # Last reported faults per side, so a fault is logged when it starts and ends.
+        self._state_faults: dict[str, list[str]] = {}
 
     def handle(self, event: Mapping[str, Any]) -> bool:
         """Process one event. Returns False when the node should exit."""
@@ -152,8 +185,20 @@ class GateNode:
         elif input_id in _IK_INPUTS:
             self.gate.on_ik(_IK_INPUTS[input_id], _qpos(value), now)
         elif input_id in _STATE_INPUTS:
-            epoch = arrow.start_epoch(event.get("metadata"))
-            self.gate.on_state(_STATE_INPUTS[input_id], _qpos(value), now, epoch)
+            side = _STATE_INPUTS[input_id]
+            faults = state_faults(value)
+            if faults != self._state_faults.get(side, []):
+                self.log(
+                    f"[dora-openarm-gate] {side}: ignoring arm state ({', '.join(faults)})"
+                    if faults
+                    else f"[dora-openarm-gate] {side}: arm state is live again"
+                )
+                self._state_faults[side] = faults
+            if not faults:
+                # A faulty state is dropped as if it never came: the feedback goes
+                # stale and the gate holds (stale_state) instead of steering blind.
+                epoch = arrow.start_epoch(event.get("metadata"))
+                self.gate.on_state(side, _qpos(value), now, epoch)
         elif input_id == "reset_position":
             self.gate.on_reset_position(_qpos(value), now)
         elif input_id == "control":

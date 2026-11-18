@@ -12,7 +12,8 @@
 	url = https://github.com/enactic/dora-openarm-dummy-camera.git
 [submodule "nodes/dora-openarm"]
 	path = nodes/dora-openarm
-	url = https://github.com/enactic/dora-openarm.git
+	url = https://github.com/guchio123/dora-openarm.git
+	branch = can-recovery-gripper-posforce
 [submodule "nodes/dora-openarm-ker"]
 	path = nodes/dora-openarm-ker
 	url = https://github.com/enactic/dora-openarm-ker.git

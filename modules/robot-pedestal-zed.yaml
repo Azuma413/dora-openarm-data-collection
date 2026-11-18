@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ROBOT=pedestal-zed: robot-pedestal plus a ZED Mini on the head. Followers
-# on CAN, no lifter; the ZED gives the head images and depth.
+# ROBOT=pedestal-zed: robot-pedestal plus a ZED Mini on the head and USB
+# cameras on the wrists. Followers on CAN, no lifter; the ZED gives the head
+# images and depth.
 # See robot-cell.yaml for the common inputs and outputs.
 module:
   name: robot-pedestal-zed
@@ -51,7 +52,9 @@ nodes:
     args: "--side right --align-trigger gripper --config openarm_pedestal"
     inputs:
       # Event ID is only used. Event value isn't used.
-      request_state: _mod/position_right
+      # The quittable tick, not the position: the gate sends nothing until it
+      # has seen a state, so tying the state to the command never starts.
+      request_state: _mod/tick
       move_position: _mod/position_right
       command: _mod/arm_command
     outputs:
@@ -62,7 +65,7 @@ nodes:
     path: ../dora-openarm
     args: "--side left --align-trigger gripper --config openarm_pedestal"
     inputs:
-      request_state: _mod/position_left
+      request_state: _mod/tick
       move_position: _mod/position_left
       command: _mod/arm_command
     outputs:
@@ -117,9 +120,43 @@ nodes:
       - depth
       - depth_preview
 
-  # Renames the ZED's outputs to the common names. Stops on Quit with the
-  # ZED because `camera_tick` is closed, which also closes the outputs that
-  # are never sent.
+  # Wrist cameras are disabled: they aren't connected yet. To enable them,
+  # uncomment these two nodes, set CAPTURE_PATH, and move camera_wrist_*
+  # back above "Not sent" with their inputs in `cameras`.
+  # # USB cameras on the wrists, the same as robot-cell.yaml's.
+  # - id: wrist-right
+  #   path: ../opencv-video-capture
+  #   env:
+  #     # Please configure! A stable name for the device, such as a udev
+  #     # symlink or /dev/v4l/by-id/...-video-index0; /dev/videoN can swap
+  #     # between the two wrists across reboots.
+  #     CAPTURE_PATH: "/dev/camera_wrist_right"
+  #     ENCODING: "jpeg"
+  #     IMAGE_HEIGHT: 600
+  #     IMAGE_WIDTH: 960
+  #     JPEG_QUALITY: 90
+  #   inputs:
+  #     tick: _mod/camera_tick
+  #   outputs:
+  #     - image
+
+  # - id: wrist-left
+  #   path: ../opencv-video-capture
+  #   env:
+  #     # Please configure! See wrist-right.
+  #     CAPTURE_PATH: "/dev/camera_wrist_left"
+  #     ENCODING: "jpeg"
+  #     IMAGE_HEIGHT: 600
+  #     IMAGE_WIDTH: 960
+  #     JPEG_QUALITY: 90
+  #   inputs:
+  #     tick: _mod/camera_tick
+  #   outputs:
+  #     - image
+
+  # Renames the cameras' outputs to the common names. Stops on Quit with the
+  # cameras because `camera_tick` is closed, which also closes the outputs
+  # that are never sent.
   - id: cameras
     path: ../dora-echo
     inputs:
@@ -133,6 +170,7 @@ nodes:
       - camera_head_depth
       - camera_head_depth_preview
       # Not sent by the pedestal.
+      - camera_ceiling
+      # Not sent while the wrist cameras are disabled.
       - camera_wrist_right
       - camera_wrist_left
-      - camera_ceiling

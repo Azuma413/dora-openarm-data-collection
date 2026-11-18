@@ -1148,3 +1148,86 @@ def test_node_stamps_commands_with_the_followers_start_epoch():
     node.handle(tick())
     stamps = {i: m.get("start_epoch") for i, _, m in sent if i.startswith("cmd_")}
     assert stamps == {"cmd_right": 3, "cmd_left": None}
+
+
+def driver_state(qpos, motor_status=None, carrier=True) -> pa.Array:
+    """STATE8 shaped like dora-openarm's: qpos plus per-motor status and the bus."""
+    return pa.array(
+        [
+            {
+                "qpos": np.asarray(qpos, dtype=np.float32),
+                "motor_status": motor_status or ["ENABLED"] * DOF,
+                "bus": {"carrier": carrier},
+            }
+        ]
+    )
+
+
+def test_state_faults_reads_motor_status_and_carrier():
+    home = LIMITS["right"].home
+    assert gate_node.state_faults(driver_state(home)) == []
+    assert gate_node.state_faults(driver_state(home, ["DISABLED"] * DOF)) == []
+    silent = ["ENABLED"] * DOF
+    silent[3] = "SILENT"
+    silent[7] = "OVERCURRENT"
+    assert gate_node.state_faults(driver_state(home, silent)) == ["J4=SILENT", "J8=OVERCURRENT"]
+    assert gate_node.state_faults(driver_state(home, carrier=False)) == ["bus=no_carrier"]
+    # Nothing to judge by: trusted as before.
+    assert gate_node.state_faults(arrow.state_array(home, np.zeros(8), np.zeros(8))) == []
+    assert gate_node.state_faults(pa.array(home, type=pa.float32())) == []
+
+
+def test_node_holds_when_the_motors_stop_answering():
+    """The driver repeats the last qpos when the motors go silent; the gate must not
+    take that as feedback and keep steering (CAN unplugged mid-run)."""
+    node, sent, clock = make_node()
+    lines: list[str] = []
+    node.log = lines.append
+    right, left = LIMITS["right"].home, LIMITS["left"].home
+
+    def step(*events):
+        for e in events:
+            clock.t += 0.004
+            assert node.handle(e)
+
+    def last_state():
+        return json.loads(arrow.text(outputs(sent, "gate_state")[-1]))["right"]
+
+    for _ in range(5):
+        step(
+            event("state_right", driver_state(right)),
+            event("state_left", driver_state(left)),
+            event("position_right", arrow.qpos_array(right)),
+            event("position_left", arrow.qpos_array(left)),
+            tick(),
+        )
+    assert last_state()["state"] == ENGAGED
+
+    silent = ["SILENT"] * DOF
+    for _ in range(20):  # 80 ms > stale_s
+        step(
+            event("state_right", driver_state(right, silent, carrier=False)),
+            event("state_left", driver_state(left)),
+            event("position_right", arrow.qpos_array(right)),
+            event("position_left", arrow.qpos_array(left)),
+            tick(),
+        )
+    assert last_state() == {"state": HOLDING, "reason": STALE_STATE, "homing": False}
+    ignored = [line for line in lines if "right: ignoring arm state" in line]
+    assert len(ignored) == 1
+    assert "J1=SILENT" in ignored[0] and "bus=no_carrier" in ignored[0]
+
+    step(event("state_right", driver_state(right)), tick())
+    assert last_state()["reason"] != STALE_STATE
+    assert any(line.endswith("right: arm state is live again") for line in lines)
+
+
+def test_node_sends_nothing_while_the_motors_never_answered():
+    node, sent, clock = make_node()
+    silent = ["SILENT"] * DOF
+    for _ in range(10):
+        clock.t += 0.004
+        node.handle(event("state_right", driver_state(LIMITS["right"].home, silent)))
+        node.handle(event("position_right", arrow.qpos_array(LIMITS["right"].home)))
+        node.handle(tick())
+    assert outputs(sent, "cmd_right") == []

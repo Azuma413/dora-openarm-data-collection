@@ -54,7 +54,9 @@ nodes:
     args: "--side right --align-trigger gripper --config openarm_pedestal"
     inputs:
       # Event ID is only used. Event value isn't used.
-      request_state: _mod/position_right
+      # The quittable tick, not the position: the gate sends nothing until it
+      # has seen a state, so tying the state to the command never starts.
+      request_state: _mod/tick
       move_position: _mod/position_right
       command: _mod/arm_command
     outputs:
@@ -65,7 +67,7 @@ nodes:
     path: ../dora-openarm
     args: "--side left --align-trigger gripper --config openarm_pedestal"
     inputs:
-      request_state: _mod/position_left
+      request_state: _mod/tick
       move_position: _mod/position_left
       command: _mod/arm_command
     outputs:
