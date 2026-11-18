@@ -177,7 +177,7 @@ are modules under [`modules/`](modules) picked by environment variables:
 
 | Variable | Values | Picks | Default |
 |---|---|---|---|
-| `LEADER` | `ker`, `vr`, `webxr`, `dummy` | `modules/leader-$LEADER.yaml` | `dummy` |
+| `LEADER` | `ker`, `vr`, `webxr`, `webxr-hold` (left arm held at `HOLD_JOINTS_LEFT`), `dummy` | `modules/leader-$LEADER.yaml` | `dummy` |
 | `ROBOT` | `cell` (real Cell), `pedestal`, `pedestal-zed`, `mujoco`, `dummy` | `modules/robot-$ROBOT.yaml` | `dummy` |
 
 dora doesn't expand environment variables in `module:` paths

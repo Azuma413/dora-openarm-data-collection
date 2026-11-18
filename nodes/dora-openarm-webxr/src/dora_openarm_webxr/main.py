@@ -79,6 +79,11 @@ _POSE_MODE = "neck"
 # its position still follows the controller. scripts/ee-orientation.py reads
 # one off a recorded episode.
 _FIXED_ORIENTATIONS: dict = {}
+# Per side, seven joint angles in radians to hold that arm at, from
+# --hold-joints-{side}. A held side sends them with the trigger's gripper on
+# ``hold_position_{side}`` instead of a pose, so the dataflow can drive that
+# arm straight from it and solve IK for the other one alone.
+_HOLD_JOINTS: dict = {}
 
 # Clutched relative control, from --clutch. Off, each hand pose maps onto the
 # robot absolutely, as the upstream node does. On, a hand drives its arm only
@@ -613,6 +618,20 @@ def _build_pose_output(pose: np.ndarray) -> pa.Array:
     return pa.array([{"pose": pose}], type=_POSE_STRUCT_TYPE)
 
 
+_QPOS_STRUCT_TYPE = pa.struct({"qpos": pa.list_(pa.float32())})
+
+
+def _build_qpos_output(qpos: np.ndarray) -> pa.Array:
+    """Wrap joint angles as a length-1 StructArray: [{"qpos": [...]}].
+
+    The same layout dora-openarm-ik sends, so a held arm takes it in
+    place of the IK output.
+    """
+    return pa.array(
+        [{"qpos": np.asarray(qpos, dtype=np.float32)}], type=_QPOS_STRUCT_TYPE
+    )
+
+
 def _build_head_pose_output(pose: dict) -> pa.Array:
     """Wrap the headset pose, in our style: [x, y, z, qw, qx, qy, qz].
 
@@ -769,6 +788,18 @@ def _publish_poses(state):
     for side, smoother in state.smoothers.items():
         pose = response.get(f"pose_{side}")
         trigger = response.get(f"trigger_{side}")
+        hold_joints = _HOLD_JOINTS.get(side)
+        if hold_joints is not None:
+            # Held at fixed joints: no pose for IK, only the joints with the
+            # trigger's gripper, which the arm also needs to start aligning.
+            if trigger is not None:
+                gripper_angle = _map_trigger_to_gripper(trigger, side)
+                node.send_output(
+                    f"hold_position_{side}",
+                    _build_qpos_output(np.append(hold_joints, gripper_angle)),
+                    metadata,
+                )
+            continue
         if (
             not pose
             or not reference
@@ -1175,6 +1206,16 @@ def main():
                 "controller (default). See scripts/ee-orientation.py."
             ),
         )
+        parser.add_argument(
+            f"--hold-joints-{side}",
+            default=os.getenv(f"HOLD_JOINTS_{side.upper()}", ""),
+            metavar="J1,...,J7",
+            help=(
+                f"Hold the {side} arm at these joint angles in radians, sent "
+                f"on hold_position_{side} with the trigger's gripper instead "
+                f"of pose_{side}; empty follows the controller (default)."
+            ),
+        )
     video.add_arguments(parser)
 
     global args
@@ -1210,6 +1251,22 @@ def main():
         if not np.isfinite(norm) or norm < 1e-6:
             parser.error(f"{option} must be a nonzero quaternion qw,qx,qy,qz")
         _FIXED_ORIENTATIONS[side] = (quaternion / norm).astype(np.float32)
+    for side in ("left", "right"):
+        option = f"--hold-joints-{side}"
+        text = getattr(args, f"hold_joints_{side}").strip()
+        if not text:
+            continue
+        try:
+            joints = np.array([float(v) for v in text.split(",")], dtype=np.float32)
+        except ValueError:
+            parser.error(f"{option} must be seven numbers in radians")
+        if joints.shape != (7,) or not np.all(np.isfinite(joints)):
+            parser.error(f"{option} must be seven numbers in radians")
+        _HOLD_JOINTS[side] = joints
+    if len(_HOLD_JOINTS) == 2:
+        parser.error(
+            "--hold-joints-left and --hold-joints-right leave nothing to drive"
+        )
 
     # argparse cannot express "required unless another option is given",
     # and WebXR only runs on an HTTPS page, so the certificate is required

@@ -623,3 +623,28 @@ def test_clutch_released_on_session_end(node, clutch, monkeypatch):
     main._on_session_end()
     assert not main._clutches["right"].engaged
     assert main._clutches["right"].target is not None
+
+
+def test_hold_joints_sends_joints_with_trigger_gripper(node, monkeypatch):
+    joints = np.array([-1.66, -0.157, 1.57, 0.293, 0.157, -0.22, -1.08], np.float32)
+    monkeypatch.setattr(main, "_HOLD_JOINTS", {"left": joints})
+    state = main._ConnectionState()
+    frame = _hand_frame()
+    frame["trigger_left"] = 1.0
+    main._process_frame(frame, state)
+    main._publish_poses(state)
+    assert "pose_left" not in node.ids()
+    assert "pose_right" in node.ids()
+    qpos = np.asarray(node.value("hold_position_left")[0]["qpos"].as_py())
+    np.testing.assert_allclose(qpos[:7], joints, atol=1e-6)
+    assert qpos[7] == pytest.approx(main._map_trigger_to_gripper(1.0, "left"))
+
+
+def test_hold_joints_waits_for_trigger(node, monkeypatch):
+    monkeypatch.setattr(main, "_HOLD_JOINTS", {"left": np.zeros(7, np.float32)})
+    state = main._ConnectionState()
+    frame = _hand_frame()
+    del frame["trigger_left"]
+    main._process_frame(frame, state)
+    main._publish_poses(state)
+    assert "hold_position_left" not in node.ids()
