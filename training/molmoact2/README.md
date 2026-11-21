@@ -19,8 +19,8 @@
 | 開始チェックポイント | `allenai/MolmoAct2-Think` |
 | 学習コード | `lib/molmoact2/experiments`（公式リリース版）。編集はせず、`molmoact2_patches.py` で実行時に挙動を変える |
 
-> **注意:** このコードは構文チェックしかしていません。データ生成も学習も未実行です。
-> 必ず手順 4 の smoke テストを通してから本番の学習を始めてください。
+> **注意:** データ生成（69 エピソード）、smoke テスト、H200 1 枚での LoRA 学習の開始までは確認済みです。
+> 環境やデータを変えたときは、手順 4 の smoke テストを通してから本番の学習を始めてください。
 
 ---
 
@@ -173,8 +173,8 @@ PROFILE=h200 NPROC=1 ./run_train.sh --max_duration=5000
 
 | 項目 | 既定 | 変更方法 |
 | --- | --- | --- |
-| device batch / global batch | 8 / 64 | `DEVICE_BATCH`、`GLOBAL_BATCH` |
-| ステップ数 | 15000 | `MAX_STEPS` |
+| device batch / global batch | 8 / 64 | `DEVICE_BATCH`、`GLOBAL_BATCH`。activation checkpointing を切っているので、H200 で device batch 16 は OOM になる（8 でピーク約 113GB） |
+| ステップ数 | 5000 | `MAX_STEPS` |
 | 保存間隔 | 2500 ステップ（直近 4 つを保持） | `SAVE_INTERVAL` |
 | 保存先 | `training/molmoact2/checkpoints/<EXP_NAME>/` | `SAVE_FOLDER`、`EXP_NAME` |
 
@@ -189,6 +189,9 @@ LoRA の dropout を 0 にしているのは、binding の 2 回の forward で 
 
 ### 共通の設定（公式の Depth FT レシピに準拠）
 
+activation checkpointing は切っています（`--activation_checkpointing=false`）。LoRA でも forward の再計算が入ると、フル FT と同じくらいの計算量になるためです。H200 1 枚で約 9.3 秒/ステップです（有効時は約 12.2 秒）。
+
+
 `--enable_depth_reasoning=true --num_depth_tokens=128 --num_depth_tokens_per_image=100 --depth_code_input_noise_rate=0.1 --style_robot_action=1.0 --style_robot_depth_action=1.0 --num_flow_timesteps=8 --packing=false --dynamic_seq_len=true`
 
 ### ログ
@@ -198,9 +201,40 @@ LoRA の dropout を 0 にしているのは、binding の 2 回の forward で 
 | 指標 | 意味 |
 | --- | --- |
 | `train/binding/loss` | binding 損失 |
-| `train/binding/cosine` | bbox を入れ替えたときの速度変化と、デモの行動差のコサイン類似度。上がっていけば bbox に追従している |
+| `train/binding/cosine` | bbox を入れ替えたときの速度変化と、デモの行動差のコサイン類似度（ペアごとの平均）。上がっていけば bbox に追従している |
+| `train/binding/cosine_pooled` | 同じコサインを全ペアまとめて計算したもの |
+| `train/binding/gain` | 速度変化をデモの行動差に射影した大きさ。0 は bbox を無視、1 はデモの差どおりに追従 |
 | `train/binding/response_abs` / `target_abs` | 上記の速度変化と行動差の大きさ |
-| `train/binding/pairs` | 1 ステップあたりのペア数 |
+| `train/binding/pairs` | 1 ステップあたりのペア数（全 micro-batch・全 rank の合計） |
+
+### bbox 追従のモニタと自動停止
+
+bbox への追従性は、毎ステップ `<保存先>/binding_monitor.jsonl` に記録されます（wandb の有無に関係なく残ります）。
+
+- `"type": "step"` の行: そのステップの `pairs`、`cosine`、`gain` などです。
+- `"type": "check"` の行: 直近 `WINDOW` ステップ分のペアをまとめた判定結果です。コンソールにも `binding check step=... OK/FAIL` と出ます。
+- `"type": "stop"` の行: 停止した理由です。
+
+次のどれかに当てはまると binding が機能していないとみなし、学習を止めます。
+trainer の cancel 経路（SIGTERM と同じ）で止めるので、止める直前に checkpoint が保存されます。
+
+- `PLUMBING_STEPS` ステップ経ってもペアが 1 つも trainer に届いていない（ペアファイルが読めていない）
+- binding 損失が NaN / inf になった
+- `WARMUP` ステップ以降の判定で、直近 `WINDOW` ステップの `cosine < MIN_COSINE` または `gain < MIN_GAIN` が `STRIKES` 回続いた
+
+| 変数 | 既定 | 内容 |
+| --- | --- | --- |
+| `MOLMOACT2_BINDING_CHECK` | 1 | 0 で自動停止を無効化（記録は続ける） |
+| `MOLMOACT2_BINDING_CHECK_WARMUP` | 1500 | 追従性の判定を始めるステップ |
+| `MOLMOACT2_BINDING_CHECK_INTERVAL` | 250 | 判定の間隔（ステップ）。trainer の cancel 判定（50 ステップごと）に合わせて 50 の倍数にする |
+| `MOLMOACT2_BINDING_CHECK_WINDOW` | 500 | 判定に使う直近のステップ数 |
+| `MOLMOACT2_BINDING_CHECK_MIN_COSINE` | 0.05 | `cosine` の下限 |
+| `MOLMOACT2_BINDING_CHECK_MIN_GAIN` | 0.05 | `gain` の下限 |
+| `MOLMOACT2_BINDING_CHECK_STRIKES` | 2 | 何回連続で下回ったら止めるか |
+| `MOLMOACT2_BINDING_CHECK_PLUMBING_STEPS` | 100 | ペアが届いているかを確認するステップ |
+
+ペアが付くのは全フレームの約 2% なので、global batch 64 では 1 ステップあたり 1 組強です。
+判定は 1 ステップの値ではなく、`WINDOW`（既定 500 ステップ、約 650 組）分をまとめて行います。
 
 ### binding 関連の環境変数
 

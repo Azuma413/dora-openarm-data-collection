@@ -27,6 +27,10 @@ Patches
      weighted by the detached pair weight ``w_ij``. The loss is averaged over all rows
      of the micro-batch (rows without a donor contribute zero), and its backward runs
      separately so peak memory does not grow by the binding branch.
+4. **bbox-following monitor** (``BindingMonitor``): logs the binding statistics of every
+   step to ``<save_folder>/binding_monitor.jsonl`` and cancels the run (through the
+   trainer's own cancel path, which saves a checkpoint first) when binding is not
+   working; see the class docstring and the MOLMOACT2_BINDING_CHECK_* variables.
 
 Configuration (environment variables, read in every process):
   MOLMOACT2_BINDING_WEIGHT   lambda for the binding loss (default 0.5, i.e. the
@@ -35,6 +39,11 @@ Configuration (environment variables, read in every process):
   MOLMOACT2_BINDING_PAIRS    path to binding_pairs.parquet (default: <dataset>/meta/)
   MOLMOACT2_BBOX_CAMERA      camera key that gets the overlay (observation.images.head_left)
   MOLMOACT2_BBOX_COLOR       R,G,B of the overlay (0,255,0)
+  MOLMOACT2_BBOX_COLOR_NAME  colour word used in the instruction (derived from the RGB value)
+  MOLMOACT2_TASK_TEMPLATE    language instruction for every frame; {color} is replaced by the colour
+                             name (default "Apply the compress patch at the location marked by the
+                             {color} box.")
+  MOLMOACT2_SEGMENT_MASK     1 (default) masks action-chunk steps that cross a target switch
   MOLMOACT2_BBOX_THICKNESS   line width in px at 1280 px image width (4)
 """
 
@@ -90,6 +99,39 @@ def bbox_camera() -> str:
 # ---------------------------------------------------------------------------
 
 
+_COLOR_NAMES = {
+    (0, 255, 0): "green", (255, 0, 0): "red", (0, 0, 255): "blue", (255, 255, 0): "yellow",
+    (255, 0, 255): "magenta", (0, 255, 255): "cyan", (255, 255, 255): "white", (0, 0, 0): "black",
+}
+DEFAULT_TASK_TEMPLATE = "Apply the compress patch at the location marked by the {color} box."
+
+
+def bbox_color() -> Tuple[int, int, int]:
+    return tuple(int(c) for c in os.environ.get("MOLMOACT2_BBOX_COLOR", "0,255,0").split(","))  # type: ignore[return-value]
+
+
+def task_instruction() -> str:
+    """The language instruction used for every frame: put the patch where the drawn box is.
+
+    The recorded task strings ("Apply the compress patch in one go." / "..., then reposition it.")
+    are replaced, because the target location is conveyed only by the box drawn on the front
+    image; the colour word always matches the overlay colour.
+    """
+    template = os.environ.get("MOLMOACT2_TASK_TEMPLATE") or DEFAULT_TASK_TEMPLATE
+    name = os.environ.get("MOLMOACT2_BBOX_COLOR_NAME") or _COLOR_NAMES.get(bbox_color())
+    if "{color}" in template and not name:
+        raise ValueError(f"no colour name for MOLMOACT2_BBOX_COLOR={bbox_color()}; set MOLMOACT2_BBOX_COLOR_NAME")
+    return template.format(color=name)
+
+
+def _patched_extract_question(self, example) -> str:
+    text = task_instruction()
+    if not getattr(self, "_logged_instruction", False):
+        self._logged_instruction = True
+        log.warning("language instruction for %s: %r", self._get_repo_id(), text)
+    return text
+
+
 def draw_bbox(image: np.ndarray, bbox: np.ndarray) -> np.ndarray:
     """Draw ``bbox`` (x_min, y_min, x_max, y_max in 1280x720 px) on an HWC uint8 RGB image."""
     out = np.ascontiguousarray(image).copy()
@@ -97,7 +139,7 @@ def draw_bbox(image: np.ndarray, bbox: np.ndarray) -> np.ndarray:
         return out
     h, w = out.shape[:2]
     sx, sy = w / BBOX_REF_SIZE[0], h / BBOX_REF_SIZE[1]
-    color = tuple(int(c) for c in os.environ.get("MOLMOACT2_BBOX_COLOR", "0,255,0").split(","))
+    color = bbox_color()
     thickness = max(1, int(round(_env_float("MOLMOACT2_BBOX_THICKNESS", 4.0) * w / BBOX_REF_SIZE[0])))
     p1 = (int(round(bbox[0] * sx)), int(round(bbox[1] * sy)))
     p2 = (int(round(bbox[2] * sx)), int(round(bbox[3] * sy)))
@@ -192,13 +234,82 @@ def _pair_table(self) -> Optional[_PairTable]:
     return self._binding_pairs
 
 
+class _SegmentTable:
+    """Target segments per episode from ``meta/target_bbox_segments.csv``.
+
+    In the reposition episodes the target box switches from A to B mid-episode. A frame shortly
+    before the switch shows box A, but its 30-step action chunk already contains the motion
+    towards B. ``chunk_limit`` returns how many chunk steps still belong to the frame's own
+    segment, so the rest can be masked like the padding at the end of an episode.
+    """
+
+    def __init__(self, path: Path):
+        import csv
+
+        segments: Dict[int, List[Tuple[int, int]]] = {}
+        with path.open() as f:
+            for row in csv.DictReader(f):
+                segments.setdefault(int(row["episode_index"]), []).append(
+                    (int(row["frame_start"]), int(row["frame_end"]))
+                )
+        # Only boundaries followed by another segment matter (episode ends are padded already).
+        self.switches = {
+            ep: sorted(end for _, end in segs)[:-1] for ep, segs in segments.items() if len(segs) > 1
+        }
+        log.info("target segments: %d episodes with a target switch, from %s", len(self.switches), path)
+
+    def chunk_limit(self, episode: int, frame: int) -> Optional[int]:
+        for switch in self.switches.get(episode, ()):
+            if frame < switch:
+                return switch - frame
+        return None
+
+
+def _segment_table(self) -> Optional[_SegmentTable]:
+    if getattr(self, "_segments_loaded", False):
+        return self._segments
+    self._segments_loaded = True
+    self._segments = None
+    root = self._get_dataset_root_path()
+    path = root / "meta" / "target_bbox_segments.csv" if root is not None else None
+    if path is not None and path.exists():
+        self._segments = _SegmentTable(path)
+    else:
+        log.warning("no target_bbox_segments.csv for %s; target-switch masking is off", self._get_repo_id())
+    return self._segments
+
+
+def _mask_across_target_switch(self, out: Dict[str, Any]) -> None:
+    if os.environ.get("MOLMOACT2_SEGMENT_MASK", "1") == "0" or "action" not in out:
+        return
+    table = _segment_table(self)
+    meta = out.get("metadata") or {}
+    if table is None:
+        return
+    limit = table.chunk_limit(int(meta.get("episode_index", -1)), int(meta.get("frame_index", -1)))
+    horizon = np.asarray(out["action"]).shape[0]
+    if limit is None or limit >= horizon:
+        return
+    pad = out.get("action_horizon_is_pad")
+    pad = np.zeros(horizon, dtype=bool) if pad is None else np.asarray(pad, dtype=bool).copy()
+    pad[limit:] = True
+    out["action_horizon_is_pad"] = pad
+    logged = getattr(self, "_segment_mask_logged", 0)
+    if logged < 3:
+        self._segment_mask_logged = logged + 1
+        log.warning(
+            "target switch mask: episode %s frame %s keeps %d/%d chunk steps",
+            meta.get("episode_index"), meta.get("frame_index"), int((~pad).sum()), horizon,
+        )
+
+
 _orig_get = lw.LeRobotDatasetWrapper.get
 _orig_getstate = lw.LeRobotDatasetWrapper.__getstate__
 
 
 def _patched_getstate(self):
     state = _orig_getstate(self)
-    for key in ("_binding_pairs", "_binding_pairs_loaded", "_binding_front"):
+    for key in ("_binding_pairs", "_binding_pairs_loaded", "_binding_front", "_segments", "_segments_loaded", "_logged_instruction", "_segment_mask_logged"):
         state.pop(key, None)
     return state
 
@@ -211,6 +322,9 @@ def _patched_get(self, item, rng, **kwargs):
     if self.action_format == "continuous" and codes is not None and "messages" in out:
         depth_string = build_discrete_depth_string(codes, num_depth_tokens=self.num_depth_tokens)
         out["messages"] = {**out["messages"], "prompt_only": False, "answers": depth_string}
+
+    # Chunk steps after a target switch belong to the other target: mask them (also for binding).
+    _mask_across_target_switch(self, out)
 
     front = getattr(self, "_binding_front", None)
     self._binding_front = None
@@ -327,7 +441,20 @@ def _patched_deterministic_get(self, idx, epoch=0):
 _orig_collate_call = mmc.MMCollator.__call__
 
 
+_DEPTH_SIDE_CHANNEL_KEYS = ("depth_updated_mask", "depth_buffer_codes")
+
+
 def _patched_collate_call(self, batch):
+    # With style_robot_action and style_robot_depth_action both enabled, an unpacked batch mixes
+    # examples with and without the depth side channels, which the release collator rejects
+    # ("Examples in batch are missing key 'depth_updated_mask'"). The trainer only strips these
+    # keys before the forward pass (depth supervision comes from the depth tokens in the
+    # sequence), so drop them from every example when they are not present in all of them.
+    for key in _DEPTH_SIDE_CHANNEL_KEYS:
+        present = [ex.get(key) is not None for ex in batch]
+        if any(present) and not all(present):
+            for ex in batch:
+                ex.pop(key, None)
     has_binding = all("_binding_valid" in ex for ex in batch)
     side = [{k: ex.pop(k, None) for k in BINDING_KEYS} for ex in batch]
     out = _orig_collate_call(self, batch)
@@ -448,11 +575,20 @@ _MODEL_EXCLUDE = {
 } | set(olmo_trainer._DEPTH_SUPERVISION_BATCH_KEYS)
 
 
-def _binding_loss(self, micro_batch) -> Optional[Tuple[torch.Tensor, Dict[str, float]]]:
+def _binding_loss(self, micro_batch, force: bool = False) -> Optional[Tuple[torch.Tensor, Dict[str, float]]]:
+    """Binding loss of one micro-batch (weighted sum over its pairs).
+
+    With ``force`` the forward/backward runs even without pairs (on row 0, with zero weight), so
+    every FSDP rank issues the same collectives; otherwise ranks with and without pairs in the
+    same micro-batch would deadlock.
+    """
     valid = micro_batch.get("_binding_valid")
-    if valid is None or not bool(valid.any()):
+    if valid is None:
         return None
-    rows = valid.nonzero(as_tuple=False).flatten()
+    dummy = not bool(valid.any())
+    if dummy and not force:
+        return None
+    rows = valid.nonzero(as_tuple=False).flatten() if not dummy else torch.zeros(1, dtype=torch.long, device=valid.device)
     batch_rows = int(valid.shape[0])
     model_inputs = {}
     for key, value in micro_batch.items():
@@ -488,53 +624,244 @@ def _binding_loss(self, micro_batch) -> Optional[Tuple[torch.Tensor, Dict[str, f
     target = micro_batch["_binding_delta"].index_select(0, rows).float()
     mask = micro_batch["_binding_mask"].index_select(0, rows).float()
     weight = micro_batch["_binding_weight"].index_select(0, rows).float().detach()
+    if dummy:
+        weight = torch.zeros_like(weight)
+        mask = torch.zeros_like(mask)
     per_pair = ((delta_v - target) ** 2 * mask).sum(dim=(1, 2)) / mask.sum(dim=(1, 2)).clamp_min(1.0)
-    loss = (weight * per_pair).sum() / max(1, batch_rows)
-    # Diagnostics: how much the policy currently reacts to the bbox swap vs. the demonstrated difference.
+    # Weighted sum over this micro-batch's pairs; _patched_train_batch divides by the number
+    # of pairs in the whole optimizer step, so L_bind is a mean over pairs (ListenVLA Eq. 6).
+    loss = (weight * per_pair).sum()
+    # Diagnostics: how much the policy currently reacts to the bbox swap vs. the demonstrated
+    # difference. Returned as raw sums so they can be pooled over micro-batches, ranks and steps.
     with torch.no_grad():
-        resp = ((delta_v * mask).abs().sum() / mask.sum().clamp_min(1.0)).item()
-        tgt = ((target * mask).abs().sum() / mask.sum().clamp_min(1.0)).item()
-        cos = torch.nn.functional.cosine_similarity((delta_v * mask).flatten(1), (target * mask).flatten(1), dim=1)
-    stats = {
-        "binding/pair_loss": float(per_pair.mean().item()),
-        "binding/pairs": float(n),
-        "binding/rows": float(batch_rows),
-        "binding/response_abs": resp,
-        "binding/target_abs": tgt,
-        "binding/cosine": float(cos.mean().item()),
-    }
-    return loss, stats
+        dv = (delta_v * mask).flatten(1)
+        da = (target * mask).flatten(1)
+        cos = torch.nn.functional.cosine_similarity(dv, da, dim=1)
+        raw = {
+            "pairs": 0.0 if dummy else float(n),
+            "cos_sum": float(cos.sum().item()),
+            "dot": float((dv * da).sum().item()),
+            "vv": float((dv * dv).sum().item()),
+            "aa": float((da * da).sum().item()),
+            "resp_abs": float(dv.abs().sum().item()),
+            "tgt_abs": float(da.abs().sum().item()),
+            "mask": float(mask.sum().item()),
+            "pair_loss_sum": float(per_pair.sum().item()),
+        }
+    return loss, raw
+
+
+_RAW_KEYS = ("pairs", "cos_sum", "dot", "vv", "aa", "resp_abs", "tgt_abs", "mask", "pair_loss_sum", "loss")
 
 
 def _patched_train_batch(self, batch, compute_metrics):
     lam = binding_weight()
     micro_batches = self.split_batch(batch) if lam > 0 and "_binding_valid" in batch else []
     total = _orig_train_batch(self, batch, compute_metrics)
-    self._binding_stats = {}
+    raw = {k: 0.0 for k in _RAW_KEYS}
+    self._binding_raw = raw
     if not micro_batches:
         return total
-    sums: Dict[str, float] = {}
-    loss_sum = 0.0
-    for micro_batch in micro_batches:
-        result = _binding_loss(self, micro_batch)
+    # L_bind = sum_ij w_ij * l_ij / N_pairs over the optimizer step (N_pairs summed over ranks, so
+    # the DDP/FSDP gradient average keeps the same normalisation). Dividing by all rows instead
+    # would shrink lambda by the pair coverage (~2% of frames), which made binding ineffective.
+    n_pairs = torch.tensor(float(batch["_binding_valid"].sum().item()), device=self.device)
+    world = 1
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        world = torch.distributed.get_world_size()
+        torch.distributed.all_reduce(n_pairs)
+    n_pairs = float(n_pairs.item())
+    if n_pairs <= 0:
+        return total
+    # Which micro-batch indices have a pair on any rank: all ranks must run those forwards.
+    has_pair = torch.tensor(
+        [float(bool(mb["_binding_valid"].any())) for mb in micro_batches], device=self.device
+    )
+    if world > 1:
+        torch.distributed.all_reduce(has_pair)
+    for m, micro_batch in enumerate(micro_batches):
+        if has_pair[m].item() <= 0:
+            continue
+        result = _binding_loss(self, micro_batch, force=world > 1)
         if result is None:
             continue
         loss, stats = result
-        scaled = lam * loss / len(micro_batches)
+        # Gradients are averaged over ranks, hence the factor `world`.
+        scaled = lam * loss * world / n_pairs
         scaled.backward()
         total = total + scaled.detach()
-        loss_sum += float(loss.detach().item()) / len(micro_batches)
+        raw["loss"] += float(loss.detach().item()) * world / n_pairs
         for k, v in stats.items():
-            sums[k] = sums.get(k, 0.0) + (v if k in {"binding/pairs", "binding/rows"} else v / len(micro_batches))
-    self._binding_stats = {"binding/loss": loss_sum, **sums}
+            raw[k] += v
     return total
 
 
+def _summarize(raw: Dict[str, float]) -> Dict[str, float]:
+    """Pair-pooled bbox-following metrics from summed raw statistics."""
+    pairs = raw["pairs"]
+    out = {"pairs": pairs}
+    if pairs <= 0:
+        return out
+    out["cosine"] = raw["cos_sum"] / pairs  # mean per-pair cosine(dv, dA)
+    out["cosine_pooled"] = raw["dot"] / max(np.sqrt(raw["vv"] * raw["aa"]), 1e-12)
+    out["gain"] = raw["dot"] / max(raw["aa"], 1e-12)  # projection of dv on dA; 1 = follows fully
+    out["response_abs"] = raw["resp_abs"] / max(raw["mask"], 1.0)
+    out["target_abs"] = raw["tgt_abs"] / max(raw["mask"], 1.0)
+    out["pair_loss"] = raw["pair_loss_sum"] / pairs
+    return out
+
+
+class BindingMonitor:
+    """Logs how well the policy follows the drawn bbox and cancels the run if binding is not working.
+
+    Every step the pair statistics of the binding branch (summed over micro-batches and ranks) are
+    appended to ``<save_folder>/binding_monitor.jsonl``. Every ``check_interval`` steps from
+    ``warmup`` on, the statistics pooled over the last ``window`` steps are checked:
+
+    - ``cosine`` (mean per-pair cosine between the velocity change caused by swapping in the donor
+      bbox and the demonstrated action difference) must be >= ``min_cosine``, and
+    - ``gain`` (projection of that velocity change onto the demonstrated difference; 0 = the bbox
+      is ignored, 1 = the full demonstrated difference) must be >= ``min_gain``.
+
+    ``strikes`` consecutive failed checks cancel the run. The run is also cancelled immediately if
+    no binding pair has reached the trainer after ``plumbing_steps`` steps or the binding loss is
+    not finite. Cancelling goes through the trainer's own cancel path, so a checkpoint is saved
+    before it stops. Thresholds come from MOLMOACT2_BINDING_CHECK_* environment variables.
+    """
+
+    def __init__(self, save_folder: str):
+        self.warmup = int(_env_float("MOLMOACT2_BINDING_CHECK_WARMUP", 1500))
+        self.window = int(_env_float("MOLMOACT2_BINDING_CHECK_WINDOW", 500))
+        self.interval = int(_env_float("MOLMOACT2_BINDING_CHECK_INTERVAL", 250))
+        self.min_cosine = _env_float("MOLMOACT2_BINDING_CHECK_MIN_COSINE", 0.05)
+        self.min_gain = _env_float("MOLMOACT2_BINDING_CHECK_MIN_GAIN", 0.05)
+        self.strikes_to_stop = int(_env_float("MOLMOACT2_BINDING_CHECK_STRIKES", 2))
+        self.plumbing_steps = int(_env_float("MOLMOACT2_BINDING_CHECK_PLUMBING_STEPS", 100))
+        self.enabled = os.environ.get("MOLMOACT2_BINDING_CHECK", "1") != "0"
+        self.history: List[Tuple[int, Dict[str, float]]] = []
+        self.total_pairs = 0.0
+        self.strikes = 0
+        self.failed: Optional[str] = None
+        self.path = Path(save_folder) / "binding_monitor.jsonl" if save_folder else None
+        self.is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+        if self.is_main:
+            log.info(
+                "binding monitor: log=%s warmup=%d window=%d interval=%d min_cosine=%.3f min_gain=%.3f "
+                "strikes=%d plumbing_steps=%d enabled=%s", self.path, self.warmup, self.window, self.interval,
+                self.min_cosine, self.min_gain, self.strikes_to_stop, self.plumbing_steps, self.enabled,
+            )
+
+    def _write(self, record: Dict[str, Any]) -> None:
+        if not self.is_main or self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a") as f:
+                f.write(json.dumps(record, default=float) + "\n")
+        except (OSError, TypeError, ValueError) as e:  # logging must never kill the run
+            log.warning("binding monitor: cannot write %s: %s", self.path, e)
+
+    def update(self, step: int, raw: Dict[str, float]) -> Tuple[Dict[str, float], Optional[str]]:
+        self.history.append((step, raw))
+        if len(self.history) > self.window:
+            self.history.pop(0)
+        self.total_pairs += raw["pairs"]
+        summary = _summarize(raw)
+        self._write({"type": "step", "step": step, "loss": raw["loss"], **summary})
+        if not self.enabled or self.failed is not None:
+            return summary, None
+
+        reason = None
+        if not np.isfinite(raw["loss"]) or not np.isfinite(raw["dot"]):
+            reason = f"binding loss is not finite at step {step} (loss={raw['loss']})"
+        elif step >= self.plumbing_steps and self.total_pairs == 0:
+            reason = f"no binding pair reached the trainer in the first {step} steps (pair table not used?)"
+        elif step >= self.warmup and step % self.interval == 0:
+            pooled = {k: sum(r[k] for _, r in self.history) for k in _RAW_KEYS}
+            window = _summarize(pooled)
+            ok = bool(
+                window["pairs"] > 0
+                and window.get("cosine", 0.0) >= self.min_cosine
+                and window.get("gain", 0.0) >= self.min_gain
+            )
+            self.strikes = 0 if ok else self.strikes + 1
+            record = {
+                "type": "check", "step": step, "window_steps": len(self.history), "ok": ok,
+                "strikes": self.strikes, "min_cosine": self.min_cosine, "min_gain": self.min_gain,
+                **{f"window_{k}": v for k, v in window.items()},
+            }
+            self._write(record)
+            if self.is_main:
+                log.info(
+                    "binding check step=%d %s: window pairs=%d cosine=%.4f (min %.3f) gain=%.4f (min %.3f) "
+                    "response_abs=%.4f target_abs=%.4f strikes=%d/%d", step, "OK" if ok else "FAIL",
+                    int(window["pairs"]), window.get("cosine", float("nan")), self.min_cosine,
+                    window.get("gain", float("nan")), self.min_gain, window.get("response_abs", float("nan")),
+                    window.get("target_abs", float("nan")), self.strikes, self.strikes_to_stop,
+                )
+            if self.strikes >= self.strikes_to_stop:
+                reason = (
+                    f"bbox binding not working at step {step}: over the last {len(self.history)} steps "
+                    f"({int(window['pairs'])} pairs) cosine={window.get('cosine', float('nan')):.4f} "
+                    f"(min {self.min_cosine}) gain={window.get('gain', float('nan')):.4f} (min {self.min_gain}), "
+                    f"{self.strikes} consecutive failed checks"
+                )
+        if reason is not None:
+            self.failed = reason
+            self._write({"type": "stop", "step": step, "reason": reason})
+            if self.is_main:
+                log.error("binding monitor: %s -> cancelling the run", reason)
+        return summary, reason
+
+
+def _all_reduce_raw(raw: Dict[str, float], device) -> Dict[str, float]:
+    if not (torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1):
+        return raw
+    t = torch.tensor([raw[k] for k in _RAW_KEYS], dtype=torch.float64, device=device)
+    torch.distributed.all_reduce(t)
+    out = dict(zip(_RAW_KEYS, t.tolist()))
+    out["loss"] /= torch.distributed.get_world_size()
+    return out
+
+
+def _install_graceful_sigterm(trainer) -> None:
+    """Make SIGTERM cancel the run through the trainer, which saves a checkpoint first.
+
+    Without wandb the release trainer installs no SIGTERM handler, so `kill` loses all progress.
+    """
+    import signal
+
+    if getattr(trainer, "_openarm_sigterm", False):
+        return
+    trainer._openarm_sigterm = True
+
+    def _handler(signum, frame):
+        log.warning("SIGTERM received: cancelling at the next cancel check (checkpoint will be saved)")
+        trainer._cancelled = True
+        trainer._cancel_reason = "SIGTERM received"
+
+    signal.signal(signal.SIGTERM, _handler)
+
+
 def _patched_train_step(self, batch, compute_metrics=True):
+    _install_graceful_sigterm(self)
     metrics = _orig_train_step(self, batch, compute_metrics)
-    stats = getattr(self, "_binding_stats", None)
-    if stats and metrics is not None:
-        metrics.update({f"train/{k}": v for k, v in stats.items()})
+    raw = getattr(self, "_binding_raw", None)
+    if raw is None or binding_weight() <= 0:
+        return metrics
+    raw = _all_reduce_raw(raw, self.device)
+    monitor = getattr(self, "_binding_monitor", None)
+    if monitor is None:
+        monitor = self._binding_monitor = BindingMonitor(str(self.cfg.save_folder))
+    summary, stop_reason = monitor.update(int(self.global_step), raw)
+    if metrics is not None:
+        metrics["train/binding/loss"] = raw["loss"]
+        metrics.update({f"train/binding/{k}": v for k, v in summary.items()})
+    if stop_reason is not None:
+        # Same path as SIGTERM: the fit loop picks it up at its next cancel check, saves a
+        # checkpoint and stops. Every rank sees the same all-reduced statistics, so they agree.
+        self._cancelled = True
+        self._cancel_reason = stop_reason
     return metrics
 
 
@@ -545,6 +872,7 @@ def apply() -> None:
     if getattr(lw.LeRobotDatasetWrapper, "_openarm_patched", False):
         return
     lw.LeRobotDatasetWrapper._extract_image = _patched_extract_image
+    lw.LeRobotDatasetWrapper._extract_question = _patched_extract_question
     lw.LeRobotDatasetWrapper.get = _patched_get
     lw.LeRobotDatasetWrapper.__getstate__ = _patched_getstate
     lw.LeRobotDatasetWrapper._openarm_patched = True

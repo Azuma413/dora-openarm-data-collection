@@ -162,8 +162,26 @@ def main() -> None:
     pos = np.arange(n) - ep_start
     ep_len = np.repeat(lengths, lengths)
 
-    # Rows with a full action chunk and a full motion history inside the episode.
+    # Rows with a full action chunk and a full motion history inside the episode, whose first
+    # `steps` actions stay within the same target segment (no A->B switch inside the chunk:
+    # those actions already head for the other target, which the drawn bbox does not show).
     eligible = (pos >= args.history) & (pos + args.steps <= ep_len)
+    seg_end = np.full(n, np.iinfo(np.int64).max, dtype=np.int64)  # next switch frame per row
+    seg_path = view / "meta" / "target_bbox_segments.csv"
+    if seg_path.exists():
+        import csv
+
+        switches: dict[int, list[int]] = {}
+        with seg_path.open() as fh:
+            for row in csv.DictReader(fh):
+                switches.setdefault(int(row["episode_index"]), []).append(int(row["frame_end"]))
+        for e, ends in switches.items():
+            for switch in sorted(ends)[:-1]:
+                sel = (ep == e) & (f["frame_index"] < switch)
+                seg_end[sel] = np.minimum(seg_end[sel], switch)
+        crossing = f["frame_index"] + args.steps > seg_end
+        print(f"excluded {int((eligible & crossing).sum())} anchors whose first {args.steps} actions cross a target switch")
+        eligible &= ~crossing
     rows = np.flatnonzero(eligible)
 
     chunk = np.stack([action_n[rows + s] for s in range(args.steps)], axis=1)  # (m, steps, D)

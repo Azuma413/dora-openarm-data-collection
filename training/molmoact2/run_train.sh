@@ -16,6 +16,8 @@ NPROC="${NPROC:-1}"
 export OPENARM_REPO_ID="${OPENARM_REPO_ID:-webxr-pedestal-zed-lerobot-curated-molmoact2}"
 export LEROBOT_DATA_ROOT="${LEROBOT_DATA_ROOT:-$HOME/openarm-datasets/molmoact2}"
 export LEROBOT_DEPTH_DATA_ROOT="${LEROBOT_DEPTH_DATA_ROOT:-$HOME/openarm-datasets/molmoact2-depth}"
+# olmo.data.get_dataset reads MOLMO_DATA_DIR unconditionally; the LeRobot path does not use it.
+export MOLMO_DATA_DIR="${MOLMO_DATA_DIR:-$HOME/.cache/molmo_data}"
 export LEROBOT_VIDEO_BACKEND="${LEROBOT_VIDEO_BACKEND:-pyav}"
 export OPENARM_MOLMOACT2_PATCH=1
 export MOLMOACT2_BINDING_WEIGHT="${MOLMOACT2_BINDING_WEIGHT:-0.5}"
@@ -29,7 +31,7 @@ case "$PROFILE" in
            --num_workers=2 --save_interval=100000) ;;
   h200)
     BATCH=(--device_batch_size="${DEVICE_BATCH:-8}" --global_batch_size="${GLOBAL_BATCH:-64}"
-           --max_duration="${MAX_STEPS:-15000}" --log_interval=20 --num_workers=8 --pin_memory=true
+           --max_duration="${MAX_STEPS:-5000}" --log_interval=20 --num_workers=16 --pin_memory=true
            --save_interval="${SAVE_INTERVAL:-2500}" --save_num_checkpoints_to_keep=4 --data.timeout=900) ;;
   *) echo "unknown PROFILE=$PROFILE" >&2; exit 1 ;;
 esac
@@ -56,6 +58,7 @@ exec "$HERE/.venv/bin/torchrun" --standalone --nproc-per-node="$NPROC" "$HERE/tr
   allenai/MolmoAct2-Think openarm_bbox \
   "${WANDB[@]}" "${BATCH[@]}" "${TUNE[@]}" \
   --save_folder="$SAVE" \
+  --activation_checkpointing=false \
   --packing=false --dynamic_seq_len=true --crop_mode=resize --frame_loading_backend=av \
   --num_flow_timesteps=8 --mask_action_dim_padding=true --random_camera_order=none \
   --use_annotated_task=false --sample_annotated_task=false \
