@@ -47,3 +47,9 @@
 [submodule "lib/openarm_mujoco"]
 	path = lib/openarm_mujoco
 	url = https://github.com/enactic/openarm_mujoco.git
+[submodule "lib/lerobot"]
+	path = lib/lerobot
+	url = https://github.com/huggingface/lerobot.git
+[submodule "lib/molmoact2"]
+	path = lib/molmoact2
+	url = https://github.com/allenai/molmoact2.git
