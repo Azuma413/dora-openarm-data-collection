@@ -1167,6 +1167,10 @@ def test_state_faults_reads_motor_status_and_carrier():
     home = LIMITS["right"].home
     assert gate_node.state_faults(driver_state(home)) == []
     assert gate_node.state_faults(driver_state(home, ["DISABLED"] * DOF)) == []
+    # One motor restarted under an enabled arm: no torque there, not a paused arm.
+    restarted = ["ENABLED"] * DOF
+    restarted[5] = "DISABLED"
+    assert gate_node.state_faults(driver_state(home, restarted)) == ["J6=DISABLED"]
     silent = ["ENABLED"] * DOF
     silent[3] = "SILENT"
     silent[7] = "OVERCURRENT"

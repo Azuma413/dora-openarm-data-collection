@@ -1,0 +1,32 @@
+[project]
+name = "dora-openarm-policy"
+version = "0.1.0"
+description = "dora-rs node that runs the small flow-matching policy on OpenArm between the IK and the gate, with a browser UI for the bbox"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+
+# torch and torchvision come from the CUDA index; scripts/policy-setup installs
+# them into .venv-policy first. Not part of the data collection environment.
+dependencies = [
+  "dora-rs >= 0.5.0, <= 1.0.1",
+  "numpy >= 2.0",
+  "openai >= 1.66",
+  "opencv-python-headless",
+  "pyarrow",
+  "pyyaml",
+  "torch",
+  "torchvision",
+]
+
+[project.scripts]
+dora-openarm-policy = "dora_openarm_policy.main:main"
+
+[build-system]
+requires = ["setuptools >= 61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+dora_openarm_policy = ["index.html"]
+
+[tool.ruff]
+line-length = 110

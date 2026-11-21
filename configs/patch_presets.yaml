@@ -1,0 +1,41 @@
+# Target positions for the compress patch: the bboxes the voice assistant may pick.
+# Made by scripts/make-patch-presets from datasets/webxr-pedestal-zed-lerobot-curated
+# (103 distinct targets, an evenly spaced 3x3 grid over the targets' spread, median box size): each preset is the median box of
+# the trained targets it stands for. The VLM reads the names.
+# bbox: x1, y1, x2, y2 in head_left pixels at image_size.
+image_size: [1280, 720]
+# back: head_left sees the patient's back (their left is the image's left); or front.
+view: back
+# Drawn (UI, VLM) as non-overlapping grid cells of this size around each bbox;
+# the policy gets the bbox, which is the trained size and so overlaps its neighbors.
+cell_px: [75, 75]
+step_px: 30
+margin_px: 70
+presets:
+  - id: 1
+    name: "本人の左・上"
+    bbox: [408, 340, 526, 495]  # 7 targets
+  - id: 2
+    name: "背中の中央・上"
+    bbox: [483, 340, 601, 495]  # 15 targets
+  - id: 3
+    name: "本人の右・上"
+    bbox: [558, 340, 676, 495]  # 16 targets
+  - id: 4
+    name: "本人の左・中"
+    bbox: [408, 415, 526, 570]  # 18 targets
+  - id: 5
+    name: "背中の中央・中"
+    bbox: [483, 415, 601, 570]  # 16 targets
+  - id: 6
+    name: "本人の右・中"
+    bbox: [558, 415, 676, 570]  # 10 targets
+  - id: 7
+    name: "本人の左・下"
+    bbox: [408, 490, 526, 645]  # 8 targets
+  - id: 8
+    name: "背中の中央・下"
+    bbox: [483, 490, 601, 645]  # 4 targets
+  - id: 9
+    name: "本人の右・下"
+    bbox: [558, 490, 676, 645]  # 9 targets

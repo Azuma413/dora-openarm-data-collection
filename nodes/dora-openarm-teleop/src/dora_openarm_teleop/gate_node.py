@@ -132,8 +132,9 @@ def state_faults(value: pa.Array) -> list[str]:
 
     dora-openarm keeps publishing state when the motors stop answering or the CAN
     link goes down: the qpos is the last reply, stamped as new. Taking it would keep
-    the gate engaged on an arm it cannot see. A flat QPOS8, or a struct without
-    motor_status / bus, has nothing to say and is trusted as before.
+    the gate engaged on an arm it cannot see. A motor DISABLED while others are
+    ENABLED (it restarted mid-run, without torque) is a fault too. A flat QPOS8, or
+    a struct without motor_status / bus, has nothing to say and is trusted as before.
     """
     try:
         if not pa.types.is_struct(value.type) or len(value) == 0:
@@ -141,11 +142,22 @@ def state_faults(value: pa.Array) -> list[str]:
         row = value[0].as_py() or {}
     except Exception:  # noqa: BLE001 - malformed input is the qpos check's job
         return []
+    statuses = list(row.get("motor_status") or [])
     faults = [
         f"J{index + 1}={status}"
-        for index, status in enumerate(row.get("motor_status") or [])
+        for index, status in enumerate(statuses)
         if status not in _LIVE_MOTOR_STATUSES
     ]
+    # All DISABLED is a paused arm and its reading is fine. Some DISABLED while
+    # others are ENABLED is a motor that restarted under a running arm (a brief
+    # power loss): its reading is fresh, but it holds no torque until the arm is
+    # stopped and started again, so the gate must not keep driving the arm.
+    if "ENABLED" in statuses:
+        faults += [
+            f"J{index + 1}=DISABLED"
+            for index, status in enumerate(statuses)
+            if status == "DISABLED"
+        ]
     bus = row.get("bus")
     if isinstance(bus, Mapping) and bus.get("carrier") is False:
         faults.append("bus=no_carrier")

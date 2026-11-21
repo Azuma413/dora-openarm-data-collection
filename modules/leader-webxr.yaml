@@ -31,6 +31,7 @@ module:
     - tick
     - camera_head_left
     - camera_head_right
+    - camera_wrist_right
     - command
     - state_right
     - state_left

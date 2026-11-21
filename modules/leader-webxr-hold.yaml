@@ -27,6 +27,7 @@ module:
     - tick
     - camera_head_left
     - camera_head_right
+    - camera_wrist_right
   outputs:
     - follower_position_right
     - follower_position_left

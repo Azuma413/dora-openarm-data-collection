@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Make configs/patch_presets.yaml from the training data's target bboxes.
+
+    .venv/bin/python scripts/make-patch-presets VIEW configs/patch_presets.yaml
+    .venv/bin/python scripts/make-patch-presets VIEW out.yaml -k 12 --preview presets.jpg
+
+VIEW is the curated dataset the policy was trained on: either the annotated
+dataset itself, whose meta/target_bbox_segments.csv has one row per target
+(x_min, y_min, x_max, y_max in head_left 1280x720 px), or a training view whose
+data parquet has a `target_bbox` column (as training/small_flow/build_cache.py
+reads it). Each distinct target of each episode counts once, however long it
+was held. The targets' centers are
+clustered with k-means, and each preset is the median box of its cluster, so
+every preset is a place the policy has been trained to go to.
+
+Names are generated from where the preset sits in the image ("画像の上・左"). Rename
+them to body parts ("左肩の上") after looking at --preview: the VLM is told the
+names besides seeing the numbered boxes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+
+def load_targets(view: Path) -> np.ndarray:
+    segments = view / "meta" / "target_bbox_segments.csv"
+    if segments.exists():
+        import csv
+
+        with segments.open(encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        sizes = {(r.get("image_width"), r.get("image_height")) for r in rows} - {(None, None)}
+        if sizes - {("1280", "720")}:
+            raise SystemExit(f"{segments}: bboxes drawn on {sizes}, expected 1280x720")
+        # Every row is a target as drawn. "status" is about lifting its corners into
+        # 3D, which the presets do not use.
+        boxes = np.array([[float(r[k]) for k in ("x_min", "y_min", "x_max", "y_max")] for r in rows])
+        keep = np.all(np.isfinite(boxes), axis=1) & (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+        return boxes[keep]
+    tables = [
+        pq.read_table(f, columns=["episode_index", "target_bbox"])
+        for f in sorted((view / "data").glob("chunk-*/*.parquet"))
+    ]
+    if not tables:
+        raise SystemExit(f"{view}: no data/chunk-*/*.parquet")
+    table = pa.concat_tables(tables)
+    episodes = table.column("episode_index").to_numpy()
+    boxes = np.stack(table.column("target_bbox").to_numpy(zero_copy_only=False)).astype(np.float64)
+    keep = np.all(np.isfinite(boxes), axis=1) & (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+    rows = np.column_stack([episodes[keep], np.round(boxes[keep], 1)])
+    distinct = np.unique(rows, axis=0)
+    return distinct[:, 1:]
+
+
+def kmeans(points: np.ndarray, k: int, seed: int = 0, iterations: int = 100) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    centers = [points[rng.integers(len(points))]]
+    for _ in range(1, k):  # k-means++
+        d = np.min([np.sum((points - c) ** 2, axis=1) for c in centers], axis=0)
+        centers.append(points[rng.choice(len(points), p=d / d.sum())] if d.sum() > 0 else points[0])
+    centers = np.array(centers)
+    for _ in range(iterations):
+        labels = np.argmin(((points[:, None] - centers[None]) ** 2).sum(-1), axis=1)
+        new = np.array([points[labels == j].mean(0) if np.any(labels == j) else centers[j] for j in range(k)])
+        if np.allclose(new, centers):
+            break
+        centers = new
+    return labels
+
+
+def name_for(cx: float, cy: float, xs: tuple[float, float], ys: tuple[float, float]) -> str:
+    row = "上" if cy < ys[0] else "下" if cy > ys[1] else "中"
+    col = "左" if cx < xs[0] else "右" if cx > xs[1] else "中央"
+    return f"画像の{row}・{col}"
+
+
+def grid_presets(boxes: np.ndarray, centers: np.ndarray, cols: int, rows: int):
+    """Split the targets at quantiles of their centers into cols x rows cells; each
+    preset is the median box of a cell's targets. Returns [(box, count, col, row)]."""
+    x_edges = np.percentile(centers[:, 0], np.linspace(0, 100, cols + 1)[1:-1])
+    y_edges = np.percentile(centers[:, 1], np.linspace(0, 100, rows + 1)[1:-1])
+    col_of = np.searchsorted(x_edges, centers[:, 0], side="right")
+    out = []
+    for r in range(rows):
+        for c in range(cols):
+            in_col = col_of == c
+            # Rows within each column, so a column's cells split its own targets evenly.
+            ys = centers[in_col, 1]
+            row_edges = np.percentile(ys, np.linspace(0, 100, rows + 1)[1:-1]) if len(ys) else y_edges
+            members = boxes[in_col & (np.searchsorted(row_edges, centers[:, 1], side="right") == r)]
+            if len(members):
+                out.append((np.median(members, axis=0), len(members), c, r))
+    return out
+
+
+def regular_presets(boxes: np.ndarray, centers: np.ndarray, cols: int, rows: int):
+    """An evenly spaced cols x rows grid: centers from the 10th to the 90th percentile
+    of the target centers, every box the targets' median size. [(box, count, col, row)],
+    count = targets whose center is nearest to that preset's."""
+    w = float(np.median(boxes[:, 2] - boxes[:, 0]))
+    h = float(np.median(boxes[:, 3] - boxes[:, 1]))
+    x_lo, x_hi = np.percentile(centers[:, 0], [10, 90])
+    y_lo, y_hi = np.percentile(centers[:, 1], [10, 90])
+    xs = np.linspace(x_lo, x_hi, cols) if cols > 1 else np.array([(x_lo + x_hi) / 2])
+    ys = np.linspace(y_lo, y_hi, rows) if rows > 1 else np.array([(y_lo + y_hi) / 2])
+    grid = [(xs[c], ys[r], c, r) for r in range(rows) for c in range(cols)]
+    nearest = np.argmin([[(cx - gx) ** 2 + (cy - gy) ** 2 for gx, gy, _, _ in grid] for cx, cy in centers], axis=1)
+    return [
+        (np.array([gx - w / 2, gy - h / 2, gx + w / 2, gy + h / 2]), int(np.sum(nearest == i)), c, r)
+        for i, (gx, gy, c, r) in enumerate(grid)
+    ]
+
+
+def grid_name(col: int, cols: int, row: int, rows: int, view: str) -> str:
+    """Where a cell is, in the patient's own terms (view back: their left is the image's left)."""
+    sides = {2: ["左", "右"], 3: ["左", "中央", "右"]}.get(cols)
+    heights = {2: ["上", "下"], 3: ["上", "中", "下"]}.get(rows)
+    if sides is None or heights is None:
+        return f"列{col + 1}・行{row + 1}"
+    side = sides[col] if view == "back" else sides[::-1][col]
+    if side == "中央":
+        return f"背中の中央・{heights[row]}"
+    return f"本人の{side}・{heights[row]}"
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("view", type=Path)
+    p.add_argument("out", type=Path)
+    p.add_argument("-k", type=int, default=9, help="number of presets (k-means)")
+    p.add_argument(
+        "--grid",
+        help="COLSxROWS, e.g. 2x2: cells at quantiles of the targets instead of k-means "
+        "(named after the patient's left/right and up/down)",
+    )
+    p.add_argument(
+        "--regular",
+        help="COLSxROWS, e.g. 3x3: an evenly spaced grid over the targets' spread (10th to "
+        "90th percentile of their centers), every box the median size",
+    )
+    p.add_argument("--camera-view", choices=["back", "front"], default="back",
+                   help="which side of the patient head_left sees (written as `view`)")
+    p.add_argument("--step-px", type=float, default=30)
+    p.add_argument("--margin-px", type=float, default=40)
+    p.add_argument("--preview", type=Path, help="JPEG with the presets on a head_left frame")
+    a = p.parse_args()
+
+    boxes = load_targets(a.view)
+    centers = np.column_stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2])
+    if a.regular or a.grid:
+        cols, rows = (int(v) for v in (a.regular or a.grid).lower().split("x"))
+        cells = (regular_presets if a.regular else grid_presets)(boxes, centers, cols, rows)
+        cell = None
+        if a.regular:
+            # Shown as non-overlapping grid cells: the spacing of the preset centers.
+            cx = sorted({round((b[0] + b[2]) / 2, 1) for b, *_ in cells})
+            cy = sorted({round((b[1] + b[3]) / 2, 1) for b, *_ in cells})
+            w = float(np.median(boxes[:, 2] - boxes[:, 0]))
+            h = float(np.median(boxes[:, 3] - boxes[:, 1]))
+            cell = (cx[1] - cx[0] if len(cx) > 1 else w, cy[1] - cy[0] if len(cy) > 1 else h)
+        presets = [(box, count) for box, count, _, _ in cells]
+        names = [grid_name(c, cols, r, rows, a.camera_view) for _, _, c, r in cells]
+        method = (
+            f"an evenly spaced {cols}x{rows} grid over the targets' spread, median box size"
+            if a.regular
+            else f"a {cols}x{rows} grid at quantiles of the target centers"
+        )
+    else:
+        cell = None
+        if len(boxes) < a.k:
+            raise SystemExit(f"only {len(boxes)} distinct targets for {a.k} presets")
+        labels = kmeans(centers, a.k)
+        presets = []
+        for j in range(a.k):
+            members = boxes[labels == j]
+            if len(members):
+                presets.append((np.median(members, axis=0), len(members)))
+        presets.sort(key=lambda item: ((item[0][1] + item[0][3]) / 2, (item[0][0] + item[0][2]) / 2))
+        xs = tuple(np.percentile(centers[:, 0], [33.3, 66.7]))
+        ys = tuple(np.percentile(centers[:, 1], [33.3, 66.7]))
+        names = [name_for((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, xs, ys) for b, _ in presets]
+        method = f"k-means with k={a.k}"
+
+    lines = [
+        "# Target positions for the compress patch: the bboxes the voice assistant may pick.",
+        f"# Made by scripts/make-patch-presets from {a.view}",
+        f"# ({len(boxes)} distinct targets, {method}): each preset is the median box of",
+        "# the trained targets it stands for. The VLM reads the names.",
+        "# bbox: x1, y1, x2, y2 in head_left pixels at image_size.",
+        "image_size: [1280, 720]",
+        "# back: head_left sees the patient's back (their left is the image's left); or front.",
+        f"view: {a.camera_view}",
+        *(
+            [
+                "# Drawn (UI, VLM) as non-overlapping grid cells of this size around each bbox;",
+                "# the policy gets the bbox, which is the trained size and so overlaps its neighbors.",
+                f"cell_px: [{cell[0]:.0f}, {cell[1]:.0f}]",
+            ]
+            if cell
+            else []
+        ),
+        f"step_px: {a.step_px:g}",
+        f"margin_px: {a.margin_px:g}",
+        "presets:",
+    ]
+    for i, ((box, count), name) in enumerate(zip(presets, names), 1):
+        b = ", ".join(f"{v:.0f}" for v in box)
+        lines += [
+            f"  - id: {i}",
+            f"    name: {json.dumps(name, ensure_ascii=False)}",
+            f"    bbox: [{b}]  # {count} targets",
+        ]
+    a.out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"{a.out}: {len(presets)} presets from {len(boxes)} distinct targets ({method})")
+
+    if a.preview:
+        write_preview(a.view, a.preview, boxes, presets, cell)
+
+
+def write_preview(view: Path, out: Path, boxes: np.ndarray, presets, cell=None) -> None:
+    import av
+    import cv2
+
+    videos = sorted((view / "videos" / "observation.images.head_left").glob("chunk-*/*.mp4"))
+    if not videos:
+        print("no head_left video for the preview")
+        return
+    with av.open(str(videos[0])) as container:
+        frame = next(container.decode(video=0)).to_ndarray(format="bgr24")
+    image = cv2.resize(frame, (1280, 720))
+    for b in boxes:
+        cv2.circle(image, (int((b[0] + b[2]) / 2), int((b[1] + b[3]) / 2)), 3, (255, 255, 0), -1)
+    for i, (b, _) in enumerate(presets, 1):
+        if cell is None:
+            p1, p2 = (int(b[0]), int(b[1])), (int(b[2]), int(b[3]))
+            cv2.rectangle(image, p1, p2, (0, 170, 255), 2)
+            cv2.putText(image, str(i), (p1[0] + 4, p1[1] + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 170, 255), 2)
+            continue
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        p1 = (int(cx - cell[0] / 2), int(cy - cell[1] / 2))
+        p2 = (int(cx + cell[0] / 2), int(cy + cell[1] / 2))
+        cv2.rectangle(image, p1, p2, (0, 170, 255), 2)
+        (tw, th), _ = cv2.getTextSize(str(i), cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        cv2.putText(image, str(i), (int(cx - tw / 2), int(cy + th / 2)), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (0, 170, 255), 2)
+    if cell is not None and presets:
+        # One bbox as the policy gets it, dashed-looking thin line, for scale.
+        b = presets[len(presets) // 2][0]
+        cv2.rectangle(image, (int(b[0]), int(b[1])), (int(b[2]), int(b[3])), (0, 255, 0), 1)
+    cv2.imwrite(str(out), image)
+    print(f"preview: {out}")
+
+
+if __name__ == "__main__":
+    main()

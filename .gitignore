@@ -16,6 +16,9 @@
 /*-graph.html
 /data/
 /.venv/
+/.venv-policy/
+# Secrets for the policy node (OPENAI_API_KEY); see .env.example.
+/.env
 # MuJoCo writes its warnings here.
 /MUJOCO_LOG.TXT
 *.txt

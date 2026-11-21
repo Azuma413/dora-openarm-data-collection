@@ -15,7 +15,7 @@
 # Teleoperation and data collection. The leader and the robot are modules
 # picked by environment variables:
 #
-#   LEADER=ker|vr|webxr|dummy          modules/leader-$LEADER.yaml   (default: dummy)
+#   LEADER=ker|vr|webxr|policy|dummy   modules/leader-$LEADER.yaml   (default: dummy)
 #   ROBOT=cell|pedestal|pedestal-zed|mujoco|dummy
 #                                      modules/robot-$ROBOT.yaml     (default: dummy)
 #
@@ -107,6 +107,8 @@ nodes:
       tick: quittable-tick-leader/tick
       camera_head_left: robot/camera_head_left
       camera_head_right: robot/camera_head_right
+      # The policy leader's second camera.
+      camera_wrist_right: robot/camera_wrist_right
       command: ui/command
       state_right: robot/state_right
       state_left: robot/state_left

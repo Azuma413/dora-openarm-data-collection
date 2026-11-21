@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenArm Policy</title>
+<style>
+  :root {
+    --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #e6e9ee; --muted: #9aa4b2;
+    --go: #1f9d55; --stop: #d64545; --warn: #d69e2e; --accent: #3b82f6; --box: #22c55e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .badge { padding: 3px 10px; border-radius: 999px; font-weight: 700; font-size: 13px; background: var(--line); }
+  .badge.running { background: var(--go); }
+  .badge.stopped { background: var(--stop); }
+  .badge.returning { background: var(--warn); color: #111; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; padding: 16px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .stage { position: relative; background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; user-select: none; }
+  .stage img { display: block; width: 100%; height: auto; }
+  .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+  .hint { color: var(--muted); margin: 6px 2px 0; }
+  .viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .viewbar span { flex: 1; min-width: 200px; }
+  .viewbar span b { color: var(--box); }
+  .viewbar span.live b { color: var(--warn); }
+  .viewbar button { width: auto; margin: 0; padding: 6px 12px; font-size: 13px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+  .panel h2 { font-size: 13px; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  button { width: 100%; padding: 10px; margin: 0 0 8px; border: 0; border-radius: 6px; font-size: 15px; font-weight: 600;
+           color: var(--text); background: #2a3340; cursor: pointer; }
+  button:hover:not(:disabled) { filter: brightness(1.15); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #start { background: var(--go); font-size: 17px; padding: 14px; }
+  #stop { background: var(--stop); font-size: 22px; padding: 18px; }
+  .why { color: var(--warn); min-height: 1.4em; margin: -2px 0 8px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 3px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { color: var(--muted); width: 42%; }
+  .ok { color: #4ade80; } .bad { color: #f87171; } .mid { color: #fbbf24; }
+  #view { width: 100%; image-rendering: pixelated; border-radius: 4px; background: #000; min-height: 40px; }
+  #log { font: 12px/1.4 ui-monospace, monospace; color: var(--muted); max-height: 220px; overflow: auto; white-space: pre-wrap; margin: 0; }
+  kbd { background: #2a3340; border-radius: 3px; padding: 0 4px; }
+  #mic { background: var(--accent); }
+  #mic.on { background: var(--stop); }
+  .voicerow { display: flex; gap: 8px; align-items: center; }
+  .voicerow button { width: auto; flex: 0 0 auto; margin: 0; }
+  #vstate { font-weight: 600; }
+  .meter { position: relative; height: 10px; background: #0b0e12; border-radius: 5px; margin: 10px 0 4px; overflow: hidden; }
+  #level { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #4ade80; }
+  #thr { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--warn); }
+  #absline { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #fff; }
+  .small { color: var(--muted); font-size: 12px; }
+  .small input[type=range] { width: 100%; }
+  #vinfo { font-size: 13px; margin: 6px 0; }
+  #chat { max-height: 220px; overflow: auto; font-size: 13px; margin: 8px 0; }
+  #chat .u { color: #93c5fd; } #chat .a { color: #e6e9ee; } #chat div { margin: 2px 0; }
+  #textform { display: flex; gap: 6px; }
+  #textform input { flex: 1; min-width: 0; padding: 8px; border-radius: 6px; border: 1px solid var(--line); background: #0b0e12; color: var(--text); }
+  #textform button { width: auto; margin: 0; }
+  .viewbar label { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenArm 方策検証（small flow）</h1>
+  <span id="mode" class="badge">接続中…</span>
+  <span id="reason" style="color:var(--muted)"></span>
+</header>
+<main>
+  <section>
+    <div class="viewbar">
+      <span id="viewlabel"><b>ライブ</b></span>
+      <button id="toggleview">ライブ表示に切替</button>
+      <button id="snapnow">今の画像を撮る</button>
+      <label><input type="checkbox" id="showpresets" checked> プリセット</label>
+    </div>
+    <div class="stage" id="stage">
+      <img id="head" src="/head.mjpg" alt="head_left">
+      <canvas id="overlay"></canvas>
+    </div>
+    <p class="hint">head_left（ZED 左）。初期動作のあと・動作が止まったあとに、その時点の静止画へ自動で切り替わります。ドラッグで対象の bbox を描きます。動作中に描き直すと、次の推論から新しい bbox を使います。</p>
+  </section>
+  <aside>
+    <div class="panel">
+      <h2>音声対話</h2>
+      <div class="voicerow">
+        <button id="mic">🎤 音声オン</button>
+        <span id="vstate">オフ</span>
+      </div>
+      <div class="small" id="vnums" style="font-family: ui-monospace, monospace; margin-top: 6px">
+
+      </div>
+      <div class="meter"><div id="level"></div><div id="thr"></div><div id="absline"></div></div>
+      <div class="small">感度: 周りの音より <span id="thrval">12</span> dB 大きい音を声とみなします（小さいほど敏感）
+        <input type="range" id="thrdb" min="6" max="30" value="12"></div>
+      <div class="small">最小音量: <span id="absval">-58</span> dBFS より小さい音は声とみなしません（メーターの白線）
+        <input type="range" id="absmin" min="-80" max="-30" value="-58"></div>
+      <div id="vinfo"></div>
+      <div id="chat"></div>
+      <form id="textform"><input id="textin" placeholder="文字でも指示できます（例: 左肩に貼って）"><button>送信</button></form>
+      <button id="vreset" style="margin-top:8px">対話を最初からやり直す</button>
+    </div>
+    <div class="panel">
+      <button id="stop">■ 停止 <small>(<kbd>Space</kbd>)</small></button>
+      <button id="start">▶ 方策スタート</button>
+      <div class="why" id="why"></div>
+      <div class="small" style="margin-bottom:10px">実行速度: <b id="speedval">100</b>%（動作中でもすぐ反映。遅いほど同じ動きをゆっくり実行）
+        <input type="range" id="speed" min="10" max="100" step="5" value="100"></div>
+      <button id="proceed">湿布を受け取った（グリッパーを閉じて戻す）</button>
+      <button id="reset">初期姿勢に戻して初期動作をやり直す</button>
+      <button id="test">試し推論（腕は動かさない）</button>
+      <button id="clear">bbox を消す</button>
+    </div>
+    <div class="panel">
+      <h2>状態</h2>
+      <table id="status"></table>
+    </div>
+    <div class="panel">
+      <h2>方策への入力（head + bbox / wrist_right、学習時と同じ解像度）</h2>
+      <img id="view" alt="">
+    </div>
+    <div class="panel">
+      <h2>ログ</h2>
+      <pre id="log"></pre>
+    </div>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const img = $("head"), canvas = $("overlay"), ctx = canvas.getContext("2d");
+let status = {}, drag = null;
+// "snapshot": the frozen frame from /snapshot.jpg (switched to whenever a new one is taken); "live": /head.mjpg.
+let view = "live", shownSnap = 0;
+
+const MODE_LABEL = { passthrough: "クラッチ（方策オフ）", running: "方策で動作中", stopped: "停止中", returning: "戻り中" };
+const CLUTCH_LABEL = { setup: "初期動作中", waiting: "湿布待ち", locked: "保持", released: "保持", engaged: "操作中", stale: "保持（入力なし）" };
+
+async function post(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) console.warn(path, await r.text());
+  } catch (e) { console.warn(e); }
+}
+const act = (action) => post("/action", { action });
+$("stop").onclick = () => act("stop");
+$("start").onclick = () => act("start");
+$("proceed").onclick = () => act("proceed");
+$("reset").onclick = () => { if (confirm("両腕を初期姿勢に戻し、左腕の初期動作をやり直します。")) act("reset"); };
+$("test").onclick = () => act("test");
+$("clear").onclick = () => post("/bbox", { bbox: null });
+let speedTouched = 0;
+$("speed").oninput = () => { $("speedval").textContent = $("speed").value; speedTouched = performance.now(); };
+$("speed").onchange = () => { speedTouched = performance.now(); post("/speed", { speed: Number($("speed").value) / 100 }); };
+$("snapnow").onclick = () => act("snapshot");
+$("toggleview").onclick = () => {
+  const snap = status.snapshot;
+  if (view === "live" && snap) { view = "snapshot"; img.src = `/snapshot.jpg?seq=${snap.seq}`; shownSnap = snap.seq; }
+  else { view = "live"; img.src = "/head.mjpg?t=" + Date.now(); }
+  renderView();
+};
+function renderView() {
+  const snap = status.snapshot, label = $("viewlabel");
+  if (view === "snapshot" && snap) {
+    label.className = "";
+    label.innerHTML = `表示中: <b>${snap.label}の画像</b>（${snap.time}）`;
+    $("toggleview").textContent = "ライブ表示に切替";
+  } else {
+    label.className = "live";
+    label.innerHTML = "表示中: <b>ライブ</b>";
+    $("toggleview").textContent = "静止画に戻す";
+    $("toggleview").disabled = !snap;
+    return;
+  }
+  $("toggleview").disabled = false;
+}
+function updateSnapshot() {
+  const snap = status.snapshot;
+  if (snap && snap.seq !== shownSnap) {
+    // A new frozen frame (after the intro, after a run, or taken by hand): show it.
+    shownSnap = snap.seq;
+    view = "snapshot";
+    img.src = `/snapshot.jpg?seq=${snap.seq}`;
+  }
+  renderView();
+}
+document.addEventListener("keydown", (e) => {
+  // Esc stops from anywhere; Space only outside the text box, where it is typing.
+  if (e.code === "Escape" || (e.code === "Space" && e.target.tagName !== "INPUT")) { e.preventDefault(); act("stop"); }
+});
+
+function resize() {
+  const r = img.getBoundingClientRect();
+  canvas.width = Math.round(r.width * devicePixelRatio);
+  canvas.height = Math.round(r.height * devicePixelRatio);
+  draw();
+}
+new ResizeObserver(resize).observe(img);
+img.addEventListener("load", resize);
+
+function norm(e) {
+  const r = canvas.getBoundingClientRect();
+  return [Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1), Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1)];
+}
+canvas.addEventListener("pointerdown", (e) => { canvas.setPointerCapture(e.pointerId); const p = norm(e); drag = [p[0], p[1], p[0], p[1]]; draw(); });
+canvas.addEventListener("pointermove", (e) => { if (!drag) return; const p = norm(e); drag[2] = p[0]; drag[3] = p[1]; draw(); });
+canvas.addEventListener("pointerup", (e) => {
+  if (!drag) return;
+  const b = [Math.min(drag[0], drag[2]), Math.min(drag[1], drag[3]), Math.max(drag[0], drag[2]), Math.max(drag[1], drag[3])];
+  drag = null;
+  if (b[2] - b[0] > 0.005 && b[3] - b[1] > 0.005) { status.bbox = b; post("/bbox", { bbox: b }); }
+  draw();
+});
+
+function rect(b, color, dashed, width) {
+  const w = canvas.width, h = canvas.height;
+  const x1 = Math.min(b[0], b[2]) * w, y1 = Math.min(b[1], b[3]) * h, x2 = Math.max(b[0], b[2]) * w, y2 = Math.max(b[1], b[3]) * h;
+  ctx.setLineDash(dashed ? [8 * devicePixelRatio, 6 * devicePixelRatio] : []);
+  ctx.lineWidth = (width || 3) * devicePixelRatio;
+  ctx.strokeStyle = color;
+  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+}
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if ($("showpresets").checked && status.presets) {
+    for (const p of status.presets) {
+      const s = p.shown || p.bbox, grid = !!p.shown && p.shown.join() !== p.bbox.join();
+      rect(s, "rgba(255,170,0,0.8)", false, 1.5);
+      const x = grid ? ((s[0] + s[2]) / 2) * canvas.width - 9 * devicePixelRatio : s[0] * canvas.width;
+      const y = grid ? ((s[1] + s[3]) / 2) * canvas.height + 9 * devicePixelRatio : s[1] * canvas.height;
+      ctx.font = `${14 * devicePixelRatio}px system-ui`;
+      ctx.fillStyle = "rgba(255,170,0,0.9)";
+      ctx.fillRect(x, y - 18 * devicePixelRatio, 18 * devicePixelRatio, 18 * devicePixelRatio);
+      ctx.fillStyle = "#000";
+      ctx.fillText(String(p.id), x + 4 * devicePixelRatio, y - 4 * devicePixelRatio);
+    }
+  }
+  if (status.bbox) rect(status.bbox, "#22c55e", false);
+  if (drag) rect(drag, "#facc15", true);
+}
+
+function cls(ok) { return ok ? "ok" : "bad"; }
+function row(k, v, c) { return `<tr><td>${k}</td><td class="${c || ""}">${v}</td></tr>`; }
+function gateText(g) { return g ? (g.state === "engaged" ? "追従中" : `${g.state}（${g.reason}）`) : "—"; }
+
+function render() {
+  const m = status.mode || "";
+  $("mode").textContent = MODE_LABEL[m] || m;
+  $("mode").className = "badge " + m;
+  $("reason").textContent = m === "stopped" && status.reason ? `理由: ${status.reason}` : "";
+  $("why").textContent = m === "running" ? "" : (status.can_start ? `開始できません: ${status.can_start}` : "");
+  $("start").disabled = m === "running" || !!status.can_start;
+  $("start").textContent = m === "stopped" ? "▶ 再開（今の bbox で）" : "▶ 方策スタート";
+  $("stop").disabled = !(m === "running" || m === "returning");
+  if (status.speed !== undefined && performance.now() - speedTouched > 1500) {
+    // Follow the node's value unless the slider is being moved.
+    $("speed").value = Math.round(status.speed * 100);
+    $("speedval").textContent = $("speed").value;
+  }
+  $("proceed").disabled = !(m === "passthrough" && status.clutch && status.clutch.left === "waiting");
+  $("reset").disabled = m === "returning";
+  const inf = status.inference || {}, p = status.policy || {}, cams = status.camera_age_s || {};
+  const g = status.gate || {}, c = status.clutch || {};
+  let html = "";
+  html += row("方策", p.loaded ? `${p.name || ""}（${p.trained_steps}, ${p.warm_ms} ms/回）` : (p.error ? `失敗: ${p.error}` : "読み込み中…"), p.loaded ? "ok" : (p.error ? "bad" : "mid"));
+  html += row("ゲート 右 / 左", `${gateText(g.right)} / ${gateText(g.left)}`, cls(g.right && g.right.state === "engaged" && g.left && g.left.state === "engaged"));
+  const mf = status.motor_faults || {};
+  for (const [side, faults] of Object.entries(mf)) {
+    if (faults && faults.length) html += row(`モーター異常（${side === "right" ? "右" : "左"}）`, faults.join(", ") + (faults.some((f) => f.endsWith("=DISABLED")) ? "：再起動してトルクなし。腕の Stop → Start が必要" : ""), "bad");
+  }
+  html += row("クラッチ 右 / 左", `${CLUTCH_LABEL[c.right] || c.right || "—"} / ${CLUTCH_LABEL[c.left] || c.left || "—"}`);
+  for (const [name, age] of Object.entries(cams)) html += row(`カメラ ${name}`, `${(age * 1000).toFixed(0)} ms 前`, cls(age < 0.5));
+  html += row("bbox（1280×720 px）", status.bbox_px ? status.bbox_px.join(", ") : "未設定", status.bbox_px ? "" : "mid");
+  html += row("推論", inf.count ? `${inf.count} 回, ${inf.latency_ms} ms, 画像の遅れ ${inf.image_age_ms} ms` : "—");
+  if (inf.gap_rad !== undefined) html += row("最初の目標と現在の差", `${inf.gap_rad} rad（${inf.gap_joint}）`, inf.gap_rad < 0.1 ? "ok" : "mid");
+  if (inf.travel_rad !== undefined) html += row("チャンク内の最大移動", `${inf.travel_rad} rad（${inf.travel_joint}）`);
+  if (inf.test) html += row("試し推論", `差 ${inf.test.gap_rad} rad（${inf.test.gap_joint}）, 移動 ${inf.test.travel_rad} rad（${inf.test.travel_joint}）`);
+  if (inf.error) html += row("推論エラー", inf.error, "bad");
+  const VERDICT = { "policy holding": "方策の目標が止まっている", "blocked by contact?": "接触で動けない可能性" };
+  for (const side of ["right", "left"]) {
+    const d = (status.diag || {})[side];
+    if (!d) continue;
+    const v = d.verdict ? `<br><b>→ ${VERDICT[d.verdict] || d.verdict}</b>` : "";
+    html += row(`動作の様子（${side === "right" ? "右" : "左"}）`,
+      `目標 ${d.target_speed.toFixed(2)} rad/s・腕 ${d.arm_speed.toFixed(2)} rad/s<br>` +
+      `指令と実測の差 ${d.tracking.toFixed(3)} rad（J${d.tracking_joint}）・ゲートの遅れ ${d.gate_lag.toFixed(3)} rad<br>` +
+      `トルク ${d.torque.toFixed(1)} Nm（J${d.torque_joint}）${v}`, d.verdict ? "mid" : "");
+  }
+  html += row("再計画", `${status.execute_steps} ステップごと（${(status.execute_steps / 30 * 1000).toFixed(0)} ms）`);
+  $("status").innerHTML = html;
+  const log = $("log"), atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.textContent = (status.log || []).join("\n");
+  if (atBottom) log.scrollTop = log.scrollHeight;
+  draw();
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/status", { cache: "no-store" });
+    const s = await r.json();
+    if (drag) s.bbox = status.bbox;
+    status = s;
+    updateSnapshot();
+    updateSpeech();
+    renderVoice();
+    render();
+  } catch (e) {
+    $("mode").textContent = "ノードに接続できません";
+    $("mode").className = "badge stopped";
+  }
+  setTimeout(poll, 200);
+}
+function refreshView() {
+  const v = new Image();
+  v.onload = () => { $("view").src = v.src; setTimeout(refreshView, 400); };
+  v.onerror = () => setTimeout(refreshView, 1000);
+  v.src = "/view.jpg?t=" + Date.now();
+}
+// ---------------------------------------------------------------- voice
+// Speech is detected here, from the microphone's level against the room's noise
+// floor, so that the first sound of a voice stops the robot at once (POST
+// voice_stop), before anything is sent anywhere. The utterance (with 0.5 s before
+// the onset) is then sent as 16 kHz WAV for transcription. While a reply is
+// playing, detection is paused so the robot does not hear itself.
+const FRAME_S = 0.02, ONSET_FRAMES = 5, END_FRAMES = 40, PRE_FRAMES = 25, MAX_FRAMES = 400, MIN_VOICED = 10, FLOOR_FRAMES = 150;
+let mic = null, vad = null, speakingTTS = false, ttsTail = 0, playedSpeech = null, sending = false;
+const BUSY = { transcribing: "書き起こし中…", thinking: "考え中…", speaking: "返事を作成中…" };
+
+$("thrdb").oninput = () => { $("thrval").textContent = $("thrdb").value; };
+$("absmin").oninput = () => { $("absval").textContent = $("absmin").value; };
+for (const id of ["thrdb", "absmin"]) {
+  try { const v = localStorage.getItem("vad." + id); if (v !== null) $(id).value = v; } catch (e) {}
+  $(id).addEventListener("change", () => { try { localStorage.setItem("vad." + id, $(id).value); } catch (e) {} });
+}
+$("thrval").textContent = $("thrdb").value; $("absval").textContent = $("absmin").value;
+$("showpresets").onchange = draw;
+$("mic").onclick = async () => { if (mic) micOff(); else await micOn(); };
+$("vreset").onclick = () => post("/assistant/reset", {});
+$("textform").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("textin").value.trim();
+  if (!text) return;
+  if (status.mode === "running") act("voice_stop");
+  post("/text", { text });
+  $("textin").value = "";
+};
+
+async function micOn() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      // The microphone as it is. The browser's noise suppression and echo
+      // cancellation gate quiet passages to digital silence, which dragged the
+      // noise floor to -120 dB so that every sound looked 28 dB above it.
+      // Detection pauses while a reply plays, so no echo cancellation is needed.
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+    });
+    const actx = new AudioContext();
+    const src = actx.createMediaStreamSource(stream);
+    // Channel 0: the voice as recorded; channel 1: band-limited, for detection
+    // (motor hum and hiss count less).
+    const hp = actx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 250;
+    const lp = actx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 3500;
+    const merger = actx.createChannelMerger(2);
+    src.connect(merger, 0, 0);
+    src.connect(hp); hp.connect(lp); lp.connect(merger, 0, 1);
+    const code = `class Tap extends AudioWorkletProcessor {
+      process(inputs) { const i = inputs[0]; if (i && i.length > 1 && i[0].length) this.port.postMessage([i[0].slice(0), i[1].slice(0)]); return true; }
+    } registerProcessor("tap", Tap);`;
+    await actx.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: "application/javascript" })));
+    const tap = new AudioWorkletNode(actx, "tap", { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 2, channelCountMode: "explicit", channelInterpretation: "discrete" });
+    merger.connect(tap);
+    const frameLen = Math.round(actx.sampleRate * FRAME_S);
+    vad = { rate: actx.sampleRate, frameLen, raw: [], filt: [], fill: 0, floor: null, level: -100, speaking: false, on: 0, off: 0, frames: [], pre: [], voiced: 0, recent: [], silent: 0, onsets: 0, sent: 0 };
+    tap.port.onmessage = (e) => onAudio(e.data[0], e.data[1]);
+    mic = { stream, actx, tap };
+    $("mic").textContent = "🎤 音声オフにする";
+    $("mic").classList.add("on");
+  } catch (err) {
+    alert("マイクを使えません: " + err);
+  }
+}
+function micOff() {
+  mic.tap.port.onmessage = null;
+  mic.stream.getTracks().forEach((t) => t.stop());
+  mic.actx.close();
+  mic = null; vad = null;
+  $("mic").textContent = "🎤 音声オン";
+  $("mic").classList.remove("on");
+  renderVoice();
+}
+function onAudio(raw, filt) {
+  if (!vad) return;
+  vad.raw.push(raw); vad.filt.push(filt); vad.fill += raw.length;
+  while (vad.fill >= vad.frameLen) {
+    const r = concat(vad.raw), f = concat(vad.filt);
+    frame(r.subarray(0, vad.frameLen), f.subarray(0, vad.frameLen));
+    vad.raw = [r.slice(vad.frameLen)]; vad.filt = [f.slice(vad.frameLen)]; vad.fill -= vad.frameLen;
+  }
+}
+function concat(chunks) {
+  if (chunks.length === 1) return chunks[0];
+  const n = chunks.reduce((a, c) => a + c.length, 0), out = new Float32Array(n);
+  let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+function frame(raw, filt) {
+  let e = 0; for (let i = 0; i < filt.length; i++) e += filt[i] * filt[i];
+  const level = 10 * Math.log10(e / filt.length + 1e-12), thr = Number($("thrdb").value);
+  const absMin = Number($("absmin").value);
+  vad.level = level;
+  // The floor is the 20th percentile of the last 3 s, speech or not. It follows the
+  // motors when they start or stop (a steady noise), and a voice, which has gaps,
+  // barely raises it. It used to be frozen during an utterance, so a motor noise
+  // that rose meanwhile never let the utterance end: 15 s chunks of noise, back to back.
+  // Digital silence (a muted or gated input) says nothing about the room's noise.
+  if (level > -100) { vad.recent.push(level); if (vad.recent.length > FLOOR_FRAMES) vad.recent.shift(); }
+  else vad.silent++;
+  if (vad.recent.length) {
+    const sorted = vad.recent.slice().sort((a, b) => a - b);
+    vad.floor = sorted[Math.floor(sorted.length * 0.2)];
+  } else vad.floor = -100;
+  // Speech is above the floor by the sensitivity AND above an absolute level: the
+  // lab's voices were at -34..-40 dBFS peak, the motor noise taken for them -52..-64.
+  const loud = level > vad.floor + thr && level > absMin;
+  if (!vad.speaking) {
+    vad.pre.push(raw.slice()); if (vad.pre.length > PRE_FRAMES) vad.pre.shift();
+    const muted = speakingTTS || performance.now() < ttsTail;
+    vad.on = !muted && loud ? vad.on + 1 : 0;
+    if (vad.on >= ONSET_FRAMES) {
+      vad.speaking = true; vad.off = 0; vad.voiced = vad.on; vad.onsets++;
+      vad.frames = vad.pre.slice(); vad.pre = [];
+      // Stop first; understand later.
+      if (status.mode === "running" || status.mode === "returning") act("voice_stop");
+    }
+  } else {
+    vad.frames.push(raw.slice());
+    if (loud) vad.voiced++;
+    vad.off = level < Math.max(vad.floor + thr - 4, absMin - 4) ? vad.off + 1 : 0;
+    if (vad.off >= END_FRAMES || vad.frames.length >= MAX_FRAMES) {
+      vad.speaking = false; vad.on = 0;
+      const frames = vad.frames; vad.frames = [];
+      if (vad.voiced >= MIN_VOICED) { sendVoice(frames, vad.rate); vad.sent++; }
+    }
+  }
+}
+async function sendVoice(frames, rate) {
+  sending = true;
+  try { await fetch("/voice", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: toWav(frames, rate) }); }
+  catch (e) { console.warn(e); }
+  sending = false;
+}
+function toWav(chunks, rate) {
+  const all = concat(chunks), target = 16000, ratio = rate / target, m = Math.floor(all.length / ratio);
+  const buf = new ArrayBuffer(44 + m * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + m * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, target, true); v.setUint32(28, target * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, m * 2, true);
+  for (let i = 0; i < m; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(all.length, Math.floor((i + 1) * ratio));
+    let s = 0; for (let j = a; j < b; j++) s += all[j];
+    s /= Math.max(1, b - a);
+    v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+function updateSpeech() {
+  const sp = status.assistant && status.assistant.speech;
+  if (!sp) { if (playedSpeech === null) playedSpeech = 0; return; }
+  if (playedSpeech === null) { playedSpeech = sp.id; return; }  // already said before this page opened
+  if (sp.id === playedSpeech) return;
+  playedSpeech = sp.id;
+  const done = () => { speakingTTS = false; ttsTail = performance.now() + 400; post("/speech_done", { id: sp.id }); };
+  if (!sp.audio) { done(); return; }
+  speakingTTS = true;
+  const a = new Audio(`/tts/${sp.id}.mp3`);
+  a.onended = done; a.onerror = done;
+  a.play().catch(done);
+}
+function renderVoice() {
+  const as = status.assistant || {};
+  let state = "オフ";
+  if (mic && vad) {
+    state = speakingTTS ? "話しています" : vad.speaking ? "聞き取り中…" : sending ? "送信中…" : "待機中（話しかけてください）";
+    // Absolute scale, -90..-20 dBFS: the level, the floor + sensitivity (yellow) and the
+    // minimum (white). A voice must pass both lines.
+    const pos = (db) => Math.max(0, Math.min(100, ((db + 90) / 70) * 100)) + "%";
+    $("level").style.width = pos(vad.level);
+    $("level").style.background = vad.speaking ? "#f87171" : "#4ade80";
+    $("thr").style.left = pos(vad.floor + Number($("thrdb").value));
+    $("absline").style.left = pos(Number($("absmin").value));
+  }
+  if (as.busy) state += " / " + (BUSY[as.busy] || as.busy);
+  $("vstate").textContent = state;
+  if (mic && vad) {
+    const thrLine = vad.floor + Number($("thrdb").value), absMin = Number($("absmin").value);
+    $("vnums").textContent = `音量 ${vad.level.toFixed(0)} dB / 雑音 ${vad.floor.toFixed(0)} dB / 声のしきい値 ${Math.max(thrLine, absMin).toFixed(0)} dB（雑音+感度 ${thrLine.toFixed(0)}、最小 ${absMin}）`;
+  } else $("vnums").textContent = "";
+  let info = "";
+  if (as.enabled === false) info += `<div class="bad">対話はオフ: ${as.error || "設定を確認してください"}</div>`;
+  else if (as.error) info += `<div class="bad">エラー: ${as.error}</div>`;
+  if (as.phase) info += `<div>段階: ${as.phase === "locate" ? "貼る位置を相談中" : "位置決定済み（声をかけると止まります）"}</div>`;
+  if (as.target) info += `<div>目標: <b>${as.target}</b>（プリセット ${as.preset_id}）</div>`;
+  if (as.waiting_to_start) info += `<div class="mid">開始待ち: ${status.can_start || "まもなく開始"}</div>`;
+  $("vinfo").innerHTML = info;
+  const chat = $("chat"), atBottom = chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 4;
+  chat.innerHTML = (as.history || []).map((t) => `<div class="${t.role === "user" ? "u" : "a"}">${t.role === "user" ? "🧑 " : "🤖 "}${escapeHtml(t.text)}</div>`).join("");
+  if (atBottom) chat.scrollTop = chat.scrollHeight;
+}
+function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+setInterval(() => { if (mic) renderVoice(); }, 100);
+// Every 2 s, what detection sees, for the node's log (so a misbehaving
+// detection can be read back there).
+let vadLevels = [];
+setInterval(() => { if (mic && vad) vadLevels.push(vad.level); }, 100);
+setInterval(() => {
+  if (!mic || !vad) return;
+  const s = vadLevels.slice().sort((a, b) => a - b); vadLevels = [];
+  post("/vad_stats", {
+    level_p50: s.length ? s[Math.floor(s.length / 2)] : null, level_max: s.length ? s[s.length - 1] : null,
+    floor: vad.floor, sensitivity: Number($("thrdb").value), min_level: Number($("absmin").value),
+    speaking: vad.speaking, onsets: vad.onsets, sent: vad.sent, silent_frames: vad.silent,
+    tts: speakingTTS, rate: vad.rate,
+  });
+}, 2000);
+
+poll();
+refreshView();
+</script>
+</body>
+</html>

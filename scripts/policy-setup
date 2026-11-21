@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Make .venv-policy: CUDA torch plus the policy node, for LEADER=policy.
+#
+#   scripts/policy-setup              # small flow and MolmoAct2, CUDA 12.8 wheels
+#   TORCH_INDEX=https://download.pytorch.org/whl/cu126 scripts/policy-setup
+#
+# Kept apart from .venv (the data collection environment), which has no torch.
+# MolmoAct2 runs from the release code in lib/molmoact2/experiments (a git
+# submodule): its own package plus its vendored LeRobot, installed without
+# LeRobot's dependencies (pynput -> evdev needs kernel headers), as
+# training/molmoact2/setup_env.sh does.
+set -eu
+cd "$(dirname "$0")/.."
+index="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
+torch_pins=("torch==2.11.0" "torchvision==0.26.0")
+py=.venv-policy/bin/python
+[ -x "$py" ] || uv venv -p 3.12 .venv-policy
+pip() { uv pip install --python "$py" --index-strategy unsafe-best-match --extra-index-url "$index" "$@"; }
+
+pip "${torch_pins[@]}"
+pip "${torch_pins[@]}" "dora-rs==1.0.1" -e nodes/dora-openarm-policy pytest
+
+git submodule update --init lib/molmoact2
+experiments=lib/molmoact2/experiments
+pip "${torch_pins[@]}" -e "$experiments" torchmetrics safetensors msgspec
+uv pip install --python "$py" --no-deps -e "$experiments/lerobot"
+pip "${torch_pins[@]}" "draccus==0.10.0" "diffusers>=0.27.2,<0.36.0" "huggingface-hub>=1.0.0,<2.0.0" \
+  "accelerate>=1.10.0,<2.0.0" "datasets>=4.0.0,<5.0.0" "einops>=0.8.0,<0.9.0" "jsonlines>=4.0.0,<5.0.0" \
+  "gymnasium>=1.1.1,<2.0.0" "deepdiff>=7.0.1,<9.0.0" "termcolor>=2.4.0,<4.0.0" \
+  "imageio[ffmpeg]>=2.34.0,<3.0.0" "pyserial>=3.5,<4.0" pandas scipy "omegaconf>=2.3,<2.4"
+
+"$py" -c "import torch; print('torch', torch.__version__, 'CUDA', torch.cuda.is_available())"
+"$py" -c "import sys; sys.path[:0] = ['$experiments', '$experiments/lerobot/src']; \
+import lerobot.policies.molmoact2.modeling_molmoact2; print('MolmoAct2 importable')"

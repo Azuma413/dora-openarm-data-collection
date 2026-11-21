@@ -236,6 +236,26 @@ data/<LEADER>-<ROBOT>/lerobot/
 - 深度の特徴量があるデータセットを LeRobot で読み込むには、読み込む側の PyAV に HEVC エンコーダー（libx265）が必要です（LeRobot 0.7 が読み込み時に確認します）。
 - `scripts/view-episode.py` は以前の形式（`data/<LEADER>-<ROBOT>/dataset/`）用で、v3 のデータは読めません。
 
+### 学習した方策を実機で動かす（small flow）
+
+```bash
+scripts/policy-setup   # 初回だけ。CUDA 版 torch の入った .venv-policy を作る
+scripts/policy         # 起動すると腕がすぐ動き出し、左腕が初期動作を始める
+```
+
+ブラウザで http://localhost:8010/ を開きます。
+
+1. 左腕が爪を右下に回して開いたら、湿布を持たせて「湿布を受け取った」を押します。グリッパーが閉じ、爪を左下に回します。
+2. head_left の画像上をドラッグして、対象の bbox を描きます。動作中でも描き直せて、次の推論から反映されます。
+3. 「方策スタート」で両腕が方策で動きます。「停止」（Space / Esc でも可）で、その場で止まります。
+4. 「初期姿勢に戻して初期動作をやり直す」で両腕を開始姿勢に戻し、左腕の初期動作から始め直します。
+
+ゲートが腕を止めたとき、カメラや関節の状態が途切れたとき、推論に失敗したときは、方策が自動で止まります。
+
+**MolmoAct2 を使う**：`POLICY=molmoact2 scripts/policy` で起動します（`.env` に `POLICY=molmoact2` と書いても同じです）。
+
+**音声対話**：リポジトリ直下の `.env` に `OPENAI_API_KEY=...` を書いて起動し（`.env.example` を参照）、UI の「🎤 音声オン」を押します。「左肩に貼って」のように話すと、VLM が位置を一意に決まるまで聞き返し、プリセットから貼る位置を選んで方策を開始します。動作中に声をかけるとすぐに止まり、「もっと上」などの指示で位置を直して再開します。プリセット（`configs/patch_presets.yaml`）は、学習データのアノテーション 103 件が分布する範囲に、等間隔の 3×3 で並べた 9 か所です。詳しくは [nodes/dora-openarm-policy/README.md](nodes/dora-openarm-policy/README.md) を見てください。
+
 ## 6. トラブルシューティング
 
 | 症状 | 原因と対処 |

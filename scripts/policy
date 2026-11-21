@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Run the small flow policy on the robot, with the browser UI.
+#
+#   scripts/policy                                   # ROBOT=pedestal-zed
+#   POLICY_CHECKPOINT=training/small_flow/runs/x/latest.pt scripts/policy
+#   EXECUTE_STEPS=15 scripts/policy                  # re-plan every 0.5 s
+#
+# The arms move as soon as it starts (the UI starts them) and the left arm runs
+# its intro. Open http://localhost:8010/ for the policy, http://localhost:8000/
+# for the data collection UI (arm start/stop, recording). Ctrl+C stops.
+set -eu
+cd "$(dirname "$0")/.."
+
+export LEADER=policy
+export ROBOT="${ROBOT:-pedestal-zed}"
+if [ ! -x .venv-policy/bin/dora-openarm-policy ]; then
+  echo "No .venv-policy yet: run scripts/policy-setup first." >&2
+  exit 1
+fi
+
+run='. .venv/bin/activate && exec scripts/dora-envsubst run dataflow.yaml --uv'
+# Its own process group, so that Ctrl+C reaches dora through sg as well.
+if id -nG | grep -qw zed || [ ! -d /usr/local/zed ]; then
+  setsid sh -c "$run" &
+else
+  setsid sg zed -c "$run" &
+fi
+dora=$!
+
+stop() {
+  kill -INT -- "-$dora" 2>/dev/null || true
+}
+trap stop INT TERM
+
+echo "The arms start moving now. Policy UI: http://localhost:${POLICY_UI_PORT:-8010}/  Ctrl+C stops."
+# wait returns when a signal arrives; keep waiting until dora has stopped.
+while kill -0 "$dora" 2>/dev/null; do
+  wait "$dora" || true
+done

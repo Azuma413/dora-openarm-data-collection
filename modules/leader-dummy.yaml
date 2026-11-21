@@ -20,6 +20,7 @@ module:
     - tick
     - camera_head_left
     - camera_head_right
+    - camera_wrist_right
     # The UI's episode commands and the robot's measured joints, for a leader
     # with a safety gate (see leader-webxr.yaml). Unused here.
     - command
